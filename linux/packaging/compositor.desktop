@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Compositor for Omarchy
+GenericName=Image Editor
+Comment=Photoshop-style image editor with layers, themed by Omarchy
+Exec=compositor %F
+Icon=compositor
+Terminal=false
+Categories=Graphics;2DGraphics;RasterGraphics;
+MimeType=application/x-compositor-project;image/png;image/jpeg;image/webp;image/gif;image/bmp;image/avif;image/svg+xml;
+Keywords=photoshop;image;editor;layers;compositor;
+# Chromium derives the Wayland app_id from the app URL; this is what Hyprland sees
+# for the packaged install (/usr/share/compositor/dist/index.html).
+StartupWMClass=chrome-__usr_share_compositor_dist_index.html-Default

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+# written by scripts/sync-omarchy-theme.mjs for the dev server
+public/omarchy-theme.json
+public/colors.toml
+# makepkg output
+packaging/pkg/
+packaging/src/
+packaging/*.pkg.tar.*
+# scripts/release.sh output
+release/

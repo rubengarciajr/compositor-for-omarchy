@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# Compositor launcher for Arch Linux / Omarchy.
+#
+# Opens the built web app as a Chromium app window, pointing it at the live
+# Omarchy palette (~/.local/state/omarchy/current/theme/colors.toml) so the
+# editor follows theme switches while it runs.
+#
+#   compositor                     # follow the active Omarchy theme
+#   compositor photo.png b.jpg     # open files
+#   compositor --theme catppuccin  # force a palette (Omarchy theme name, or dark / light)
+#   compositor --browser           # show which browser engine would be used
+#   compositor --cache             # show what the private browser profile holds
+#   compositor --clean             # delete the private browser profile (app must be closed)
+#
+# Renderer: open-source Chromium is preferred; any Chromium-based browser works
+# (set COMPOSITOR_BROWSER to force one). The profile is kept lean: extensions,
+# component downloads, Safe Browsing and other background services are off.
+#
+# Why a dedicated browser profile and --allow-file-access-from-files:
+# Chromium refuses to load ES-module scripts, stylesheets and fetch() calls
+# from file:// pages (they are cross-origin to each other), and it "taints"
+# canvases that drew a file:// image so pixels can no longer be read back.
+# The flag lifts those restrictions for this profile only. Flags are ignored
+# when handed to an already-running Chromium, so the app gets its own profile
+# in ~/.local/state/compositor/browser-profile.
+
+set -euo pipefail
+
+usage() {
+  sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# ── Locate the built app: a git checkout next to this script wins over the package ──
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/../dist/index.html" || -f "$SCRIPT_DIR/../package.json" ]]; then
+  APP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+  APP_ROOT="${COMPOSITOR_ROOT:-/usr/share/compositor}"
+fi
+DIST="$APP_ROOT/dist"
+
+if [[ ! -f "$DIST/index.html" ]]; then
+  if [[ -f "$APP_ROOT/package.json" ]]; then
+    echo "dist/ missing — building…" >&2
+    (cd "$APP_ROOT" && npm install && npm run build) >&2
+  else
+    echo "Compositor is not installed (missing $DIST/index.html)." >&2
+    exit 1
+  fi
+fi
+
+# ── Arguments ─────────────────────────────────────────────────────────────
+THEME=""
+FILES=()
+ACTION="run"
+while (($# > 0)); do
+  case "$1" in
+    --theme) THEME="${2:-}"; shift 2 ;;
+    --theme=*) THEME="${1#*=}"; shift ;;
+    --browser) ACTION="browser"; shift ;;
+    --cache) ACTION="cache"; shift ;;
+    --clean) ACTION="clean"; shift ;;
+    -h | --help) usage; exit 0 ;;
+    --) shift; FILES+=("$@"); break ;;
+    -*) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
+    *) FILES+=("$1"); shift ;;
+  esac
+done
+
+# Percent-encode a query value (keeps / and : readable for file:// URLs).
+urlencode() {
+  local LC_ALL=C s="$1" out="" c
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [A-Za-z0-9._~/:-]) out+="$c" ;;
+      *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+OMARCHY_COLORS="$STATE_HOME/omarchy/current/theme/colors.toml"
+QUERY=()
+
+if [[ -n "$THEME" ]]; then
+  slug="${THEME,,}"; slug="${slug// /-}"
+  found=""
+  for dir in "$HOME/.config/omarchy/themes/$slug" "${OMARCHY_PATH:-/usr/share/omarchy}/themes/$slug"; do
+    if [[ -f "$dir/colors.toml" ]]; then
+      QUERY+=("colors=$(urlencode "file://$dir/colors.toml")")
+      found=1
+      break
+    fi
+  done
+  if [[ -z "$found" ]]; then
+    case "$slug" in
+      dark | light | tokyo-night | tokyonight | catppuccin | catppuccin-latte) QUERY+=("theme=$slug") ;;
+      *) echo "Theme '$THEME' not found in ~/.config/omarchy/themes or /usr/share/omarchy/themes; using the active theme." >&2 ;;
+    esac
+  fi
+fi
+if [[ ${#QUERY[@]} -eq 0 && -f "$OMARCHY_COLORS" ]]; then
+  QUERY+=("colors=$(urlencode "file://$OMARCHY_COLORS")")
+fi
+
+for f in "${FILES[@]:-}"; do
+  [[ -z "$f" ]] && continue
+  if [[ -f "$f" ]]; then
+    QUERY+=("open=$(urlencode "file://$(realpath -e "$f")")")
+  else
+    echo "Skipping '$f': not a file." >&2
+  fi
+done
+
+URL="file://$DIST/index.html"
+if [[ ${#QUERY[@]} -gt 0 ]]; then
+  URL+="?$(IFS='&'; printf '%s' "${QUERY[*]}")"
+fi
+
+# ── Browser engine ────────────────────────────────────────────────────────
+# Order: $COMPOSITOR_BROWSER, then open-source Chromium, then the user's default browser if it
+# is Chromium-based, then anything Chromium-based that is installed (including Flatpaks).
+find_browser() {
+  local b
+  if [[ -n "${COMPOSITOR_BROWSER:-}" ]]; then
+    printf '%s' "$COMPOSITOR_BROWSER"; return
+  fi
+  for b in chromium ungoogled-chromium chromium-browser; do
+    if command -v "$b" >/dev/null 2>&1; then printf '%s' "$b"; return; fi
+  done
+  if command -v xdg-settings >/dev/null 2>&1; then
+    case "$(xdg-settings get default-web-browser 2>/dev/null || true)" in
+      google-chrome*) b=google-chrome-stable ;;
+      brave*) b=brave ;;
+      microsoft-edge*) b=microsoft-edge-stable ;;
+      vivaldi*) b=vivaldi-stable ;;
+      helium*) b=helium ;;
+      thorium*) b=thorium-browser ;;
+      *) b="" ;;
+    esac
+    if [[ -n "$b" ]] && command -v "$b" >/dev/null 2>&1; then printf '%s' "$b"; return; fi
+  fi
+  for b in brave google-chrome-stable google-chrome microsoft-edge-stable vivaldi-stable helium thorium-browser; do
+    if command -v "$b" >/dev/null 2>&1; then printf '%s' "$b"; return; fi
+  done
+  if command -v flatpak >/dev/null 2>&1; then
+    for b in org.chromium.Chromium com.brave.Browser com.google.Chrome io.github.ungoogled_software.ungoogled_chromium; do
+      if flatpak info "$b" >/dev/null 2>&1; then printf 'flatpak run %s' "$b"; return; fi
+    done
+  fi
+}
+
+BROWSER="$(find_browser)"
+if [[ "$ACTION" == "browser" ]]; then
+  if [[ -n "$BROWSER" ]]; then echo "$BROWSER"; exit 0; fi
+  echo "none found"; exit 1
+fi
+if [[ -z "$BROWSER" ]]; then
+  msg="Compositor needs a Chromium-based browser to draw its window. Install one, e.g.:  omarchy pkg add chromium   (or: sudo pacman -S chromium)"
+  echo "$msg" >&2
+  command -v notify-send >/dev/null 2>&1 && notify-send -a Compositor "Compositor cannot start" "$msg" || true
+  exit 1
+fi
+
+# ── Private browser profile: kept small ───────────────────────────────────
+PROFILE_DIR="${COMPOSITOR_PROFILE:-$STATE_HOME/compositor/browser-profile}"
+
+profile_running() {
+  # Chromium keeps a SingletonLock symlink in the profile while it runs.
+  [[ -L "$PROFILE_DIR/SingletonLock" ]] && pgrep -f -- "--user-data-dir=$PROFILE_DIR" >/dev/null 2>&1
+}
+
+# Things a browser drops into the profile that the app never uses (models, component
+# downloads, Safe Browsing databases, speech engines, extensions). Safe to delete when closed.
+JUNK=(
+  component_crx_cache optimization_guide_model_store "Safe Browsing" WasmTtsEngine
+  OnDeviceHeadSuggestModel MEIPreload SafetyTips ZxcvbnData FileTypePolicies
+  OriginTrials PKIMetadata SSLErrorAssistant TLSDeprecationConfig hyphen-data
+  CertificateRevocation "Crowd Deny" "Subresource Filter" "Default/Extensions"
+  "Default/Extension State" "Default/Extension Rules" "Default/Extension Scripts"
+  "Default/Web Applications" "Default/Service Worker"
+)
+
+prune_profile() {
+  [[ -d "$PROFILE_DIR" ]] || return 0
+  profile_running && return 0
+  local j
+  for j in "${JUNK[@]}"; do rm -rf -- "$PROFILE_DIR/$j"; done
+}
+
+if [[ "$ACTION" == "cache" ]]; then
+  if [[ ! -d "$PROFILE_DIR" ]]; then echo "No profile yet ($PROFILE_DIR)."; exit 0; fi
+  echo "Profile: $PROFILE_DIR  (total $(du -sh "$PROFILE_DIR" | cut -f1))"
+  profile_running && echo "(in use by a running Compositor window)"
+  echo "Largest entries:"
+  du -sh "$PROFILE_DIR"/* "$PROFILE_DIR"/Default/* 2>/dev/null | sort -h | tail -12 | sed 's/^/  /'
+  echo "Run 'compositor --clean' to delete it; it is recreated on the next launch."
+  exit 0
+fi
+if [[ "$ACTION" == "clean" ]]; then
+  if profile_running; then echo "Compositor is running; close it first (Ctrl+Q)." >&2; exit 1; fi
+  rm -rf -- "$PROFILE_DIR"
+  echo "Removed $PROFILE_DIR"
+  exit 0
+fi
+
+mkdir -p "$PROFILE_DIR"
+prune_profile
+
+ARGS=(
+  --user-data-dir="$PROFILE_DIR"
+  --allow-file-access-from-files
+  --no-first-run
+  --no-default-browser-check
+  # Lean profile: no extensions, component downloads, ML models, sync, Safe Browsing
+  # databases, translation, crash upload or background fetches; a 64 MB disk cache.
+  --disable-extensions
+  --disable-component-update
+  --disable-background-networking
+  --disable-sync
+  --disable-breakpad
+  --disable-domain-reliability
+  --no-pings
+  --disable-features=OptimizationHints,OptimizationGuideModelDownloading,OptimizationHintsFetching,OptimizationTargetPrediction,MediaRouter,Translate,InterestFeedContentSuggestions,SafeBrowsingEnhancedProtection
+  --safebrowsing-disable-auto-update
+  --disk-cache-size=67108864
+  --media-cache-size=1
+  --app="$URL"
+)
+
+# Under Omarchy/uwsm, hand the app to the session's app daemon like omarchy-launch-webapp does.
+# (Checked via the daemon's pipe, not `uwsm-app ping`: ping raises a desktop notification when stdout is not a tty.)
+read -r -a BROWSER_CMD <<<"$BROWSER"
+if command -v uwsm-app >/dev/null 2>&1 && [[ -n "${WAYLAND_DISPLAY:-}" && -p "${XDG_RUNTIME_DIR:-/run/user/$UID}/uwsm-app-daemon-in" ]]; then
+  exec setsid uwsm-app -- "${BROWSER_CMD[@]}" "${ARGS[@]}"
+else
+  exec "${BROWSER_CMD[@]}" "${ARGS[@]}"
+fi

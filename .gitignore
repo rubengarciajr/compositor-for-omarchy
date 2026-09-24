@@ -1,0 +1,16 @@
+# Compositor (macOS app + Linux port)
+.DS_Store
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+
+# Linux port
+linux/node_modules/
+linux/dist/
+linux/release/
+linux/public/omarchy-theme.json
+linux/public/colors.toml
+linux/packaging/pkg/
+linux/packaging/src/
+linux/packaging/*.pkg.tar.*

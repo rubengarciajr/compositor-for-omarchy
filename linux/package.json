@@ -1,0 +1,25 @@
+{
+  "name": "compositor-for-omarchy",
+  "version": "1.1.0",
+  "description": "Photoshop-style image compositor for Arch Linux / Omarchy",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "theme": "node scripts/sync-omarchy-theme.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/smoke-test.mjs",
+    "check": "npm run build && npm test"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  },
+  "homepage": "https://github.com/rubengarciajr/compositor-for-omarchy",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rubengarciajr/compositor-for-omarchy.git"
+  }
+}
