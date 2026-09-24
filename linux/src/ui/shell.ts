@@ -1621,11 +1621,11 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     const body = document.createElement("div");
     body.className = "about";
     body.innerHTML = `
-      <div class="about-head">${icon("layers", 40)}<div><div class="about-name">${APP_NAME}</div><div class="about-version">Version ${APP_VERSION} · ${rendererName()}</div></div></div>
+      <div class="about-head"><img class="about-icon" src="./about-icon.png" width="48" height="48" alt="Compositor icon"><div><div class="about-name">${APP_NAME}</div><div class="about-version">Version ${APP_VERSION} · ${rendererName()}</div></div></div>
       <p>A Photoshop-style image editor with layers, blend modes, masks and adjustment layers, themed live by Omarchy.</p>
       <div class="about-credit">
         <div class="about-credit-title">Original app</div>
-        <p><strong>Compositor for macOS</strong> was created by <strong>${ORIGINAL_AUTHOR}</strong> (${ORIGINAL_COMPANY}). This Linux port rebuilds it for Omarchy and keeps its project format.</p>
+        <p><strong>Compositor for macOS</strong> was created by <strong>${ORIGINAL_AUTHOR}</strong> (${ORIGINAL_COMPANY}); the icon above is the original app's. This Linux port rebuilds it for Omarchy and keeps its project format.</p>
         <p><a href="${ORIGINAL_SITE_URL}" target="_blank" rel="noopener">${ORIGINAL_SITE_URL.replace("https://", "")}</a><br><a href="${ORIGINAL_REPO_URL}" target="_blank" rel="noopener">${ORIGINAL_REPO_URL.replace("https://", "")}</a></p>
       </div>
       <p class="about-small">Both the original and this port are MIT licensed.${PROJECT_URL !== ORIGINAL_REPO_URL ? ` Port: <a href="${PROJECT_URL}" target="_blank" rel="noopener">${PROJECT_URL.replace("https://", "")}</a>` : ""}</p>`;
