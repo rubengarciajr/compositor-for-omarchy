@@ -21,5 +21,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/rubengarciajr/compositor-for-omarchy.git"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

@@ -1,87 +1,62 @@
-# Compositor
+# Compositor for Omarchy
 
-> **This repository is [Compositor for Omarchy](linux/README.md)**, a Linux port of Robbie Tilton's Compositor for macOS, maintained by Ruben Garcia Jr. The macOS app's source below is the upstream project by [Robbie Tilton](https://github.com/robbietilton/Compositor) ([robbietilton.com/compositor](https://robbietilton.com/compositor)), kept intact and credited; the port lives in [`linux/`](linux/README.md). Both are MIT licensed.
+A Photoshop-style image editor for **Arch Linux + [Omarchy](https://omarchy.org)**: layers and folders, masks, blend modes, adjustment layers, selections with marching ants, type on the canvas, free transform, and the Photoshop tools and shortcuts you already know. It follows your Omarchy theme live and opens as an app window like Omarchy's other web apps.
 
-Adobe Photoshop costs too much and tools like GIMP don’t feel familiar enough for me to stay in flow. That’s why I built Compositor.
+![Compositor for Omarchy](linux/screenshot.png)
 
-> **Linux / Omarchy:** a full rebuild for Arch Linux with Omarchy `colors.toml` theming lives in [`linux/`](linux/README.md). What it adds over this app is summarised in [`docs/omarchy-upgrades.md`](docs/omarchy-upgrades.md), with a dated [changelog](docs/linux-changelog.md).
-
-The goal was to create a full-featured image editor that is completely free and open source. I use Photoshop for compositing and post-processing, so Compositor is built around that workflow - with the tools needed to create a pixel-perfect final image.
-
-Because it’s open source, you can download the Xcode project and add, remove, or modify any feature to fit your workflow.
-
-## Features
-
-### Layers
-- Layers and folders, with blend modes and opacity — a folder's opacity dims everything inside it
-- Layer masks: paint, fill, invert, blur and feather them; link or unlink them to transform a mask on its own
-- Clipping masks and folder masks
-- Adjustment layers: Hue/Saturation, Levels, Curves, Exposure, Gradient Map and Grain
-- Layer effects: Stroke, Drop Shadow, Color Overlay, Inner Shadow and Outer Glow, rendered on the GPU and editable at any time
-- Merge Down, Merge Layers and Merge Group (⌘E)
-- Duplicate, rename inline, reorder and nest by drag and drop; Option-drag to duplicate
-- Drag layers between open projects
-
-### Transform
-- Non-destructive move, scale, rotate and flip — images keep their full resolution however small you make them
-- Free distort (⌘-drag a handle), with Shift to lock to an axis
-- Transform several layers, or a whole folder, together
-- Snapping to canvas and layer edges and centers, with guides
-- Exact values for position, size, scale and angle, stepped with the arrow keys
-- Flip Layer and Flip Canvas, horizontal and vertical
-
-### Selections
-- Rectangle and Ellipse Marquee, Freehand and Polygonal Lasso, and the Magic tool — Wand selects by color, Object traces whatever you click (Tab switches)
-- Select Subject, and Expand, Contract and Feather on any selection
-- Add to and subtract from selections, move the outline, or move and duplicate the pixels inside
-- Load a layer's pixels or a mask as a selection
-- Content-Aware Fill, which can also extend an image past its edges
-
-### Painting and retouching
-- Brush with size, hardness, opacity and smoothing, in Paint or Erase mode (B and E), and Shift for straight lines
-- Spot Healing Brush (content-aware)
-- Clone Stamp, aligned or not, sampling one layer or all of them
-- Blur tool, on pixels or masks
-- Gradient tool and Shape tool (rectangles, rounded rectangles, ellipses and lines), which stay editable rather than being rasterized
-- Type tool (T): inline multiline editing in draggable, resizable paragraph boxes; font, size, color, alignment and spacing in the tool header; transform text and use it as a clipping mask
-- Eyedropper and a full color picker
-
-### Adjustments and filters
-- Levels (with Auto), Curves, Hue/Saturation, Exposure, Gradient Map, Grain and Invert
-- Gaussian Blur and Motion Blur that spread past a layer's edges
-- Add Noise, Lens Correction and Remove Background
-- Live previews, limited to the selection when there is one
-
-### Canvas and files
-- Multiple projects in tabs
-- Rulers (⌘R), guides dragged from them, a layout grid, and Snap To for guides, grid, layers and document bounds
-- Crop with snapping, and Option for symmetric cropping
-- Canvas Size and Image Size
-- Sharp high-quality downsampling when zoomed out, and a pixel grid when zoomed in
-- Import JPEG, PNG, HEIC, TIFF and Photoshop PSD (8-bit RGB only; not PSB or CMYK). PSD folders, masks, a subset of blend modes, and fill rectangles/ellipses stay editable; text and other vectors become pixels. A conversion report is shown before anything is applied.
-- Export JPEG with a live preview (⇧⌥⌘S); Copy Merged
-- Photoshop-style keyboard shortcuts throughout, remappable in Edit > Keyboard Shortcuts
-- Automatic updates, signed and notarized
+It is a Linux port of **[Compositor for macOS](https://robbietilton.com/compositor)** by **Robbie Tilton** (Wonder Assembly LLC) and shares its `.comp` project format, so files move between the two. The port lives in [`linux/`](linux/README.md); the macOS app's source is kept in this repository as the upstream original (see [The macOS original](#the-macos-original)).
 
 ## Requirements
 
-- macOS 26.5 or later
-- Xcode 26 or later (to build from source)
+**To run**
 
-## Building
+- Arch Linux with **Omarchy** (recommended, themed automatically), or any Arch-based system. Other distributions can run the release tarball; the launcher only needs bash.
+- A **Chromium-based browser** to draw the window: open-source `chromium` is preferred (`omarchy pkg add chromium`), and Chrome, Brave, Edge, Vivaldi, Helium, Thorium or their Flatpaks work as fallbacks. Firefox cannot host the app window.
+- Wayland or X11; on Omarchy the window is tiled by Hyprland and launched through uwsm like the built-in web apps.
+- About 200 KB of disk for the app, a few MB for its private browser profile, and around 400 MB of memory while it runs (the browser processes).
 
-Open `Compositor.xcodeproj` and run the **Compositor** scheme.
+**To build from source** (not needed to install a release)
 
-## Releasing
+- Node.js 20 or newer and npm
+- `makepkg` (from `base-devel`) to build the Arch package
 
-`scripts/release.sh` builds a Release version, signs it with Developer ID, notarizes and staples it, and packages it into `dist/Compositor-<version>.dmg`.
+## Install
 
-It needs, all kept outside this repository:
+From the AUR (once published):
 
-- a **Developer ID Application** certificate in the login keychain
-- notarization credentials saved with `xcrun notarytool store-credentials "compositor-notary" …`
-- [`create-dmg`](https://github.com/create-dmg/create-dmg) (`brew install create-dmg`)
+```bash
+omarchy pkg add compositor-for-omarchy
+```
+
+From the latest release (no Node needed): download `compositor-for-omarchy-<version>.tar.gz` and `PKGBUILD` from the [releases page](https://github.com/rubengarciajr/compositor-for-omarchy/releases) into one folder, then:
+
+```bash
+makepkg -si
+```
+
+From source:
+
+```bash
+git clone https://github.com/rubengarciajr/compositor-for-omarchy.git
+cd compositor-for-omarchy/linux && scripts/install.sh
+```
+
+Then launch **Compositor** from the app menu, or `compositor photo.png` from a terminal. `compositor --help` lists the options (`--theme`, `--browser`, `--cache`, `--clean`).
+
+## What you get
+
+- **Layers** — raster layers and folders, opacity, all the Photoshop blend modes, masks, clipping, effects (stroke, shadows, glow, colour overlay), adjustment layers, merge and flatten, inline rename, drag to reorder or into folders, right-click menu.
+- **Tools** — Move with free-transform handles, Marquee, Lasso (freehand and polygon), Magic Wand, Crop with handles, Brush, Eraser, Clone Stamp, Blur, Spot Healing, Gradient with Photoshop's presets, Shape, Type on the canvas, Eyedropper, Hand, Zoom — with Photoshop's modifiers (Space pans, Shift-click lines, Alt samples, Shift/Alt constrain, Ctrl-click auto-select, Alt-drag duplicate).
+- **Selections** — marching ants, add and subtract with Shift and Alt, Layer via Copy / Cut, layer mask from selection, inverse, deselect, fill and clear.
+- **Files** — `.comp` projects shared with the Mac app, images by drag & drop, paste from anywhere, export PNG and JPEG, several documents open at once.
+- **Omarchy** — the palette follows your active theme within seconds; Dark and Light are a menu away; the window behaves like Omarchy's other apps.
+
+The full feature list, keyboard reference, developer guide and packaging notes are in [`linux/README.md`](linux/README.md). What differs from the macOS app is in [`docs/omarchy-upgrades.md`](docs/omarchy-upgrades.md); the versioned changelog is [`docs/linux-changelog.md`](docs/linux-changelog.md).
+
+## The macOS original
+
+Compositor was created by [Robbie Tilton](https://github.com/robbietilton/Compositor) as a native Swift and Metal app for macOS ([robbietilton.com/compositor](https://robbietilton.com/compositor)). Its source is kept in this repository unchanged (`Compositor/`, `Compositor.xcodeproj`, tests) with its own [README](README-macOS.md), which describes the Mac app's features and how to build it with Xcode. The Linux port reimplements the app in TypeScript for Chromium; none of the Swift code runs on Linux.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). The original app and the Linux port are both MIT licensed; the original copyright belongs to Wonder Assembly LLC.

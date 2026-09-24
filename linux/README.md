@@ -75,8 +75,17 @@ flowchart LR
 
 ## Requirements
 
+**To run**
+
+- Arch Linux with Omarchy (recommended), or any Arch-based system; other distributions can use the release tarball (the launcher is plain bash).
 - A **Chromium-based browser** to draw the window. The launcher prefers open-source `chromium` (no Google services), then your default browser if it is Chromium-based, then anything Chromium-based it can find (Chrome, Brave, Edge, Vivaldi, Helium, Thorium, the Chromium / Brave / Chrome Flatpaks). Set `COMPOSITOR_BROWSER=brave` to force one; `compositor --browser` shows the choice. With none installed it prints and notifies `omarchy pkg add chromium`. Firefox cannot host the app window.
-- Node.js + npm to build.
+- Wayland or X11. On Omarchy the window is tiled by Hyprland and started through uwsm like the built-in web apps; `libnotify` (optional) shows a desktop notification when no browser is found.
+- About 200 KB of disk for the app, a few MB for its private browser profile, and roughly 400 MB of memory while running.
+
+**To build from source** (releases are prebuilt)
+
+- Node.js 20 or newer and npm
+- `base-devel` for `makepkg`; ImageMagick only if you re-render the launcher icons in `packaging/icons`
 
 ## Quick start (dev)
 
