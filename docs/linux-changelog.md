@@ -10,6 +10,9 @@ rendering, clipboard, history or theming check regresses.
 - **The app menu entry is named "Compositor"** and uses the original Compositor app icon at 48–512 px (pre-rendered in `packaging/icons`, so packaging needs no SVG tooling); the page favicon matches.
 - **About shows the original app icon** (Robbie Tilton's Compositor icon from robbietilton.com/compositor) instead of a drawn placeholder.
 
+### Fixed
+- **Layer panel buttons disappeared** (New Layer, Add Image, Group, Mask, Effect, Adjustment, Delete) once the layer list grew taller than the panel: the list now scrolls and the button row stays put.
+
 ## 1.1.0 — 2026-09-23
 
 ### Added

@@ -452,6 +452,7 @@ input[type="number"], input[type="text"], select {
 .appearance label { color: var(--fg-dark); font-size: 12px; }
 .layer-list {
   flex: 1;
+  min-height: 0; /* let the list scroll instead of pushing the footer buttons off screen */
   overflow: auto;
   padding: 8px;
   display: flex;
@@ -577,6 +578,7 @@ input[type="number"], input[type="text"], select {
 }
 .layer-footer {
   display: flex;
+  flex: none;
   border-top: 1px solid var(--border);
   padding: 4px;
 }
