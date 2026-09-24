@@ -4,7 +4,7 @@ A Photoshop-style image editor for **Arch Linux + [Omarchy](https://omarchy.org)
 
 ![Compositor for Omarchy](linux/screenshot.png)
 
-It is a Linux port of **[Compositor for macOS](https://robbietilton.com/compositor)** by **Robbie Tilton** (Wonder Assembly LLC) and shares its `.comp` project format, so files move between the two. The port lives in [`linux/`](linux/README.md); the macOS app's source is kept in this repository as the upstream original (see [The macOS original](#the-macos-original)).
+It is a Linux port of **[Compositor for macOS](https://robbietilton.com/compositor)** by **Robbie Tilton** (Wonder Assembly LLC) and shares its `.comp` project format, so files move between the two. The port lives in [`linux/`](linux/README.md).
 
 ## Requirements
 
@@ -55,7 +55,7 @@ The full feature list, keyboard reference, developer guide and packaging notes a
 
 ## The macOS original
 
-Compositor was created by [Robbie Tilton](https://github.com/robbietilton/Compositor) as a native Swift and Metal app for macOS ([robbietilton.com/compositor](https://robbietilton.com/compositor)). Its source is kept in this repository unchanged (`Compositor/`, `Compositor.xcodeproj`, tests) with its own [README](README-macOS.md), which describes the Mac app's features and how to build it with Xcode. The Linux port reimplements the app in TypeScript for Chromium; none of the Swift code runs on Linux.
+Compositor was created by [Robbie Tilton](https://github.com/robbietilton/Compositor) as a native Swift and Metal app for macOS ([robbietilton.com/compositor](https://robbietilton.com/compositor)). This repository is about the Linux port; for the Mac app, its features and how to build it, see Robbie's repository.
 
 ## License
 
