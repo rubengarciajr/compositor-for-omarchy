@@ -4,6 +4,12 @@ What changed in the Linux port (`linux/`), newest first. Before shipping an upda
 `npm run check` in `linux/` (typecheck, build and the headless self-test) — it fails if any
 rendering, clipboard, history or theming check regresses.
 
+## 1.1.1 — 2026-09-23
+
+### Changed
+- **The app menu entry is named "Compositor"** and uses the original Compositor app icon at 48–512 px (pre-rendered in `packaging/icons`, so packaging needs no SVG tooling); the page favicon matches.
+- **About shows the original app icon** (Robbie Tilton's Compositor icon from robbietilton.com/compositor) instead of a drawn placeholder.
+
 ## 1.1.0 — 2026-09-23
 
 ### Added
@@ -12,7 +18,6 @@ rendering, clipboard, history or theming check regresses.
 
 - **Layer › Add Image…** (also in the layer panel footer and the right-click menu): pick one or more image files and each becomes a new layer fitted inside the canvas, exactly like pasting. With no document open it opens the image as a new document.
 
-- **About shows the original app icon** (Robbie Tilton's Compositor icon from robbietilton.com/compositor) instead of a drawn placeholder.
 - **Renderer choice and a lean profile:** the launcher now prefers open-source Chromium (no Google services) and falls back to any Chromium-based browser it finds, including Flatpaks; with none installed it prints and notifies the install command. The private profile starts with extensions, component and ML-model downloads, Safe Browsing databases, sync, translation, crash upload and background fetches off and a 64 MB disk cache, and leftover browser junk is pruned at every launch (a Chrome profile had grown to 158 MB of Google services the app never uses). New commands: `compositor --browser`, `compositor --cache`, `compositor --clean`; `COMPOSITOR_PROFILE` picks another profile directory.
 - **Marching ants:** selections are outlined with the animated black/white dashes instead of a tint. The outline is computed once per selection (edges between selected and unselected pixels) and redrawn ten times a second from the cached composite, so it costs nothing while you work. This also removed a full-size tint canvas that was allocated on every frame.
 - **Crop handles:** after drawing a crop box, drag its corner and edge handles to adjust it (Shift keeps the ratio, Alt from the centre) or drag inside to move it; the cursor changes over handles. Enter applies, Esc cancels.

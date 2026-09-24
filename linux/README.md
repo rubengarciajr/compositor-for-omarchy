@@ -17,8 +17,8 @@ omarchy pkg add compositor-for-omarchy
 From a release tarball (no Node needed):
 
 ```bash
-curl -LO https://github.com/rubengarciajr/compositor-for-omarchy/releases/download/linux-v1.1.0/compositor-for-omarchy-1.1.0.tar.gz
-tar xf compositor-for-omarchy-1.1.0.tar.gz && cd compositor-for-omarchy-1.1.0 && sudo install -Dm755 bin/compositor /usr/bin/compositor && sudo cp -r dist /usr/share/compositor/ && sudo install -Dm644 share/compositor.desktop /usr/share/applications/compositor.desktop
+curl -LO https://github.com/rubengarciajr/compositor-for-omarchy/releases/download/linux-v1.1.1/compositor-for-omarchy-1.1.1.tar.gz
+tar xf compositor-for-omarchy-1.1.1.tar.gz && cd compositor-for-omarchy-1.1.1 && sudo install -Dm755 bin/compositor /usr/bin/compositor && sudo cp -r dist /usr/share/compositor/ && sudo install -Dm644 share/compositor.desktop /usr/share/applications/compositor.desktop
 ```
 
 From source (this folder): `scripts/install.sh` builds, runs the self-test and installs the package with `makepkg`.

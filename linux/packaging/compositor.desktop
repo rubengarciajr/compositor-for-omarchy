@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Compositor for Omarchy
+Name=Compositor
 GenericName=Image Editor
 Comment=Photoshop-style image editor with layers, themed by Omarchy
 Exec=compositor %F

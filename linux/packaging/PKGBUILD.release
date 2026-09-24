@@ -32,8 +32,7 @@ package() {
   install -Dm755 bin/compositor "$pkgdir/usr/bin/compositor"
   install -Dm644 share/compositor.desktop "$pkgdir/usr/share/applications/compositor.desktop"
   install -Dm644 share/compositor-project.xml "$pkgdir/usr/share/mime/packages/compositor-project.xml"
-  install -Dm644 share/icons/compositor.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/compositor.svg"
-  for size in 48 128 256; do
+  for size in 48 64 128 256 512; do
     install -Dm644 "share/icons/compositor-$size.png" "$pkgdir/usr/share/icons/hicolor/${size}x${size}/apps/compositor.png"
   done
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

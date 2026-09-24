@@ -30,10 +30,7 @@ mkdir -p "$STAGE/bin" "$STAGE/share/icons" "$STAGE/docs"
 cp -r dist "$STAGE/dist"
 cp scripts/compositor "$STAGE/bin/compositor"
 cp packaging/compositor.desktop packaging/compositor-project.xml "$STAGE/share/"
-cp public/icon.svg "$STAGE/share/icons/compositor.svg"
-for size in 48 128 256; do
-  rsvg-convert -w "$size" -h "$size" public/icon.svg -o "$STAGE/share/icons/compositor-$size.png"
-done
+cp packaging/icons/compositor-*.png "$STAGE/share/icons/"
 cp README.md "$STAGE/README.md"
 cp ../LICENSE "$STAGE/LICENSE"
 cp ../docs/linux-changelog.md ../docs/omarchy-upgrades.md ../docs/project-format.md "$STAGE/docs/"
