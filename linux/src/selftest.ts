@@ -384,6 +384,31 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.pointerDown(view, ev(10, 20, { alt: true })); app.pointerMove(view, ev(30, 20, { alt: true })); app.pointerUp(view, ev(30, 20, { alt: true }));
     check("alt-drag with move duplicates the layer", app.doc!.layers.length === n + 1 && app.activeLayer!.id !== topId && Math.round(app.activeLayer!.transform.x) === 20, { n, now: app.doc!.layers.length, x: app.activeLayer!.transform.x });
   }
+  // Trim transparent pixels: added images lose their empty padding but keep their place; the
+  // command also works on a rotated, flipped layer.
+  {
+    app.newDocument(200, 200, "trim");
+    const padded = createCanvas(100, 100);
+    const pc = padded.getContext("2d")!;
+    pc.fillStyle = "#ff00ff"; pc.fillRect(30, 40, 20, 20);
+    const blob = await new Promise<Blob | null>((r) => padded.toBlob(r, "image/png"));
+    await app.pasteImageFile(blob!);
+    const t = app.activeLayer!.transform;
+    const f = flattenDocument(app.doc!);
+    check("added images are trimmed to their pixels in place", t.width === 20 && t.height === 20 && t.x === 80 && t.y === 90 && app.activeLayer!.canvas!.width === 20 && px(f, 90, 100)[0] > 200 && px(f, 90, 100)[1] < 60, { t, w: app.activeLayer!.canvas!.width });
+    // A padded layer that was scaled ×2, flipped and rotated 90°: after trim the pixels stay put.
+    app.addBlankLayer();
+    const l = app.activeLayer!;
+    const lc = writableLayer(l)!.getContext("2d")!;
+    lc.fillStyle = "#00ffff"; lc.fillRect(150, 20, 10, 10); // near the top-right of the 200×200 bitmap
+    l.transform = { ...l.transform, x: 0, y: 0, width: 400, height: 400, rotation: 90, flipH: true };
+    app.emit();
+    const before = px(flattenDocument(app.doc!), 100, 100);
+    const sample = [[30, 30], [170, 30], [30, 170], [170, 170], [100, 100]].map(([x, y]) => px(flattenDocument(app.doc!), x, y).join());
+    app.trimSelected();
+    const after = [[30, 30], [170, 30], [30, 170], [170, 170], [100, 100]].map(([x, y]) => px(flattenDocument(app.doc!), x, y).join());
+    check("trim keeps a rotated, flipped, scaled layer in place", l.canvas!.width === 10 && Math.round(app.activeLayer!.transform.width) === 20 && sample.join("|") === after.join("|"), { before, sample, after, t: app.activeLayer!.transform });
+  }
   // Marching ants outline, crop handles and brush spacing.
   {
     app.newDocument(40, 30, "ants");

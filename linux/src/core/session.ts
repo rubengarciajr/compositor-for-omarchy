@@ -35,7 +35,7 @@ function selectionMode(e: { shiftKey?: boolean; altKey?: boolean }): Selection["
   if (e.altKey) return "subtract";
   return "replace";
 }
-import { cursorFor, hitTest, rotateByPointer, scaleByHandle } from "./transform";
+import { cursorFor, fromLocal, hitTest, rotateByPointer, scaleByHandle } from "./transform";
 import { PROJECT_EXTENSION, PROJECT_MIME, isProjectFile, parseProject, serializeProject } from "../io/project";
 import type { HandleSpec } from "./transform";
 import type { Transform } from "./model";
@@ -224,6 +224,7 @@ export class App {
           canvas,
           transform: defaultTransform(tw, th, Math.round((doc.width - tw) / 2), Math.round((doc.height - th) / 2)),
         });
+        this.trimLayer(layer); // PNGs often carry transparent padding; keep the pixels, drop the empty box
         const active = this.activeLayer;
         const idx = active ? doc.layers.indexOf(active) : doc.layers.length - 1;
         doc.layers.splice(idx + 1, 0, layer);
@@ -818,6 +819,42 @@ export class App {
     doc.selection = null;
     this.setTool("move");
     this.commit(cut ? "Layer via Cut" : "Layer via Copy");
+  }
+
+  /**
+   * Trim transparent pixels (Photoshop's Image › Trim): crop a raster layer's bitmap to its
+   * visible pixels. The pixels stay exactly where they are on the canvas; only the bounding
+   * box (and the transform handles) shrink. Returns true when something was trimmed.
+   */
+  trimLayer(layer: Layer | null = this.activeLayer): boolean {
+    if (!layer || layer.kind !== "raster" || !layer.canvas) return false;
+    const c = layer.canvas;
+    const b = maskBounds(c);
+    if (!b || (b.x === 0 && b.y === 0 && b.w === c.width && b.h === c.height)) return false;
+    const t = layer.transform;
+    const sx = t.width / c.width, sy = t.height / c.height;
+    // Centre of the trimmed area in the layer's unrotated frame (flips mirror it), then to the document.
+    let dx = (b.x + b.w / 2 - c.width / 2) * sx;
+    let dy = (b.y + b.h / 2 - c.height / 2) * sy;
+    if (t.flipH) dx = -dx;
+    if (t.flipV) dy = -dy;
+    const centre = fromLocal(t, { x: dx, y: dy });
+    const cropped = createCanvas(b.w, b.h);
+    cropped.getContext("2d")!.drawImage(c, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    layer.canvas = cropped;
+    const w = b.w * sx, h = b.h * sy;
+    layer.transform = { ...t, width: w, height: h, x: centre.x - w / 2, y: centre.y - h / 2 };
+    return true;
+  }
+
+  /** Layer › Trim Transparent Pixels on the selected layers. */
+  trimSelected(): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const ids = this.session.selectedLayerIds.length ? this.session.selectedLayerIds : [this.session.activeLayerId];
+    let any = false;
+    for (const id of ids) any = this.trimLayer(doc.layers.find((l) => l.id === id) ?? null) || any;
+    if (any) this.commit("Trim transparent pixels");
   }
 
   /** Turn the selection into a layer mask on the active layer (Photoshop's "Add layer mask" with a selection). */
