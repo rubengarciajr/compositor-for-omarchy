@@ -1,5 +1,7 @@
 # Compositor for Omarchy
 
+Adobe Photoshop costs too much and tools like GIMP don’t feel familiar enough to stay in flow. That’s why Robbie Tilton built Compositor for the Mac; I ported it over to Omarchy.
+
 A Photoshop-style image editor for **Arch Linux + [Omarchy](https://omarchy.org)**: layers, folders, masks, blend modes, adjustment layers, selections with marching ants, type on the canvas, free transform, and the Photoshop tools and shortcuts you already know. It follows your Omarchy theme live and opens as an app window like Omarchy's other web apps.
 
 ![Compositor for Omarchy](screenshot.png)
