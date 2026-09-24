@@ -6,6 +6,8 @@ A Photoshop-style image editor for **Arch Linux + [Omarchy](https://omarchy.org)
 
 ![Compositor for Omarchy](screenshot.png)
 
+*Background artwork in the screenshot: ["I made a theme, check it out" on Reddit](https://www.reddit.com/media?url=https%3A%2F%2Fpreview.redd.it%2Fi-made-a-theme-check-it-out-v0-kn1wqxbr36yf1.png%3Fwidth%3D1920%26format%3Dpng%26auto%3Dwebp%26s%3Dd7dfafbb6d320342d8ed9a68d33f432cb8486890).*
+
 It is a Linux rebuild of **[Compositor for macOS](https://robbietilton.com/compositor)** by **Robbie Tilton** (Wonder Assembly LLC), and shares its `.comp` project format, so files move between the two.
 
 ## Install
