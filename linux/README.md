@@ -34,7 +34,7 @@ The app is about 200 KB installed. `compositor --cache` shows the private browse
 - **Original app:** [Compositor for macOS](https://robbietilton.com/compositor) by [Robbie Tilton](https://github.com/robbietilton) — Wonder Assembly LLC, MIT. Source: [github.com/robbietilton/Compositor](https://github.com/robbietilton/Compositor).
 - **Linux port:** this `linux/` folder, MIT. Help › About in the app carries the same credit.
 - **Omarchy** by DHH and contributors provides the theme palette and the desktop conventions the port follows.
-- **Screenshot artwork:** the mountain landscape behind the logo is from the Reddit post ["I made a theme, check it out"](https://www.reddit.com/media?url=https%3A%2F%2Fpreview.redd.it%2Fi-made-a-theme-check-it-out-v0-kn1wqxbr36yf1.png%3Fwidth%3D1920%26format%3Dpng%26auto%3Dwebp%26s%3Dd7dfafbb6d320342d8ed9a68d33f432cb8486890); all credit to its artist.
+- **Screenshot artwork:** the mountain landscape behind the logo is by the author of the r/omarchy post ["I made a theme, check it out"](https://www.reddit.com/r/omarchy/comments/1ojp8ms/i_made_a_theme_check_it_out/); all credit to them.
 
 ---
 
