@@ -1391,7 +1391,7 @@ export class App {
     const t = this.session.text;
     const pad = 12;
     const descent = t.fontSize * 0.22; // the font's descender, close enough for every family we ship
-    const baseline = pad + t.fontSize * t.lineHeight - descent;
+    const baseline = pad + (t.fontSize * t.lineHeight - t.fontSize) / 2 + t.fontSize - descent; // half-leading, then the em box
     this.addTextLayer(p.x - pad, p.y - baseline, "");
     this.beginTextEdit(this.session.activeLayerId!, true);
   }

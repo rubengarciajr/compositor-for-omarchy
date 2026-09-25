@@ -1,7 +1,7 @@
 import type { BlendMode, DocumentState, Layer, ToolId } from "../core/model";
 import { BLEND_GROUPS, BLEND_LABELS, layerTree } from "../core/model";
 import type { App } from "../core/session";
-import { drawEditor, flattenDocument, screenToDoc } from "../render/compositor";
+import { drawEditor, flattenDocument, screenToDoc, viewOrigin } from "../render/compositor";
 import { drawAnts } from "../render/ants";
 import { APP_NAME, APP_VERSION, ISSUES_URL, ORIGINAL_AUTHOR, ORIGINAL_COMPANY, ORIGINAL_REPO_URL, ORIGINAL_SITE_URL, PROJECT_URL, rendererName } from "../app-info";
 const compositorApi = { screenToDoc };
@@ -582,11 +582,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     }
     const t = layer.text, tr = layer.transform, z = app.session.zoom || 1;
     const rect = canvas.getBoundingClientRect();
-    const ox = rect.width / 2 + app.session.panX - (doc.width * z) / 2;
-    const oy = rect.height / 2 + app.session.panY - (doc.height * z) / 2;
+    const { ox, oy } = viewOrigin(rect.width, rect.height, doc, app.session, window.devicePixelRatio || 1);
     const pad = textPad(t) * z;
-    // CSS centres glyphs in their line box; the canvas draws them from the em top. Shift by the half-leading.
-    const halfLead = ((t.lineHeight - 1) * t.fontSize * z) / 2;
     const s = textEditor.style;
     s.left = `${ox + tr.x * z}px`;
     s.top = `${oy + tr.y * z}px`;
@@ -594,10 +591,10 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     s.whiteSpace = t.boxWidth ? "pre-wrap" : "pre";
     s.wordBreak = t.boxWidth ? "break-word" : "normal";
     s.width = `${Math.max(tr.width / sx * z, t.fontSize * z)}px`;
-    s.height = `${Math.max(tr.height / sy * z, t.fontSize * z) + Math.max(0, halfLead)}px`;
+    s.height = `${Math.max(tr.height / sy * z, t.fontSize * z)}px`;
     s.transformOrigin = "0 0";
     s.transform = `translate(${(tr.width * z) / 2}px, ${(tr.height * z) / 2}px) rotate(${tr.rotation}deg) translate(${(-tr.width * z) / 2}px, ${(-tr.height * z) / 2}px) scale(${sx}, ${sy})`;
-    s.padding = `${Math.max(0, pad - halfLead)}px ${pad}px ${pad}px`;
+    s.padding = `${pad}px`;
     s.font = cssFont({ weight: t.weight, fontSize: t.fontSize * z, fontFamily: t.fontFamily });
     s.lineHeight = `${t.fontSize * t.lineHeight * z}px`;
     s.letterSpacing = `${t.letterSpacing * z}px`;

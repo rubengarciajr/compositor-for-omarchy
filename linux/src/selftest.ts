@@ -5,7 +5,7 @@
  */
 import type { App } from "./core/session";
 import { createCanvas, createDocument, createLayer, createRasterLayer, defaultTransform, layerTree } from "./core/model";
-import { flattenDocument, isStrokeCached } from "./render/compositor";
+import { flattenDocument, isStrokeCached, viewOrigin } from "./render/compositor";
 import { selectionOutline } from "./render/ants";
 import type { History } from "./core/history";
 import { applyThemeChoice, getThemePreference, parseColorsToml, themeChoice } from "./theme/omarchy";
@@ -135,8 +135,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const before = app.doc!.layers.length;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     app.setGradient({ preset: "fg-bg", style: "linear", reverse: false, opacity: 1 });
     app.pointerDown(view, fakeDown(ox + 0 * z, oy + 25 * z));
     app.pointerMove(view, fakeDown(ox + 100 * z, oy + 25 * z));
@@ -198,8 +198,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false }) as unknown as PointerEvent;
     app.pointerDown(view, ev(50, 30));
     app.pointerUp(view, ev(50, 30));
@@ -218,8 +218,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number, shift = false, alt = false) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: alt, shiftKey: shift }) as unknown as PointerEvent;
     const sel = (x: number) => px(app.doc!.selection!.mask!, x, 10)[3];
     app.pointerDown(view, ev(10, 10)); app.pointerUp(view, ev(10, 10));
@@ -248,8 +248,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number, shift = false, alt = false) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: alt, shiftKey: shift }) as unknown as PointerEvent;
     const sel = (x: number, y: number) => (app.doc!.selection?.mask ? px(app.doc!.selection.mask, x, y)[3] : -1);
     app.pointerDown(view, ev(10, 5));
@@ -301,8 +301,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+      const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     const click = (x: number, y: number, m?: { shift?: boolean; alt?: boolean; ctrl?: boolean }) => { app.pointerDown(view, ev(x, y, m)); app.pointerUp(view, ev(x, y, m)); };
@@ -477,7 +477,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const ev = (x: number, y: number) => {
       const rect = view.getBoundingClientRect(); const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2, oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox, oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false, ctrlKey: false, metaKey: false } as unknown as PointerEvent;
     };
     app.setTool("marquee");
@@ -592,8 +592,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+      const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     app.pointerDown(view, ev(10, 10)); app.pointerMove(view, ev(20, 20)); app.pointerUp(view, ev(20, 20));
@@ -659,8 +659,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false }) as unknown as PointerEvent;
     app.pointerDown(view, ev(10, 20));
     app.pointerMove(view, ev(40, 20));
@@ -824,8 +824,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false }) as unknown as PointerEvent;
     app.pointerDown(view, ev(20, 20)); app.pointerUp(view, ev(20, 20));
     check("type click opens an editor", app.session.textEdit?.created === true && app.activeLayer?.kind === "text" && app.activeLayer.text?.text === "", app.session.textEdit);
@@ -856,8 +856,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const view = document.getElementById("editor") as HTMLCanvasElement;
     const rect = view.getBoundingClientRect();
     const z = app.session.zoom;
-    const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-    const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+    const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
     const ev = (x: number, y: number) => ({ clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false, buttons: 1 }) as unknown as PointerEvent;
     const v0 = app.doc!.version;
     app.pointerDown(view, ev(10, 25));
@@ -904,8 +904,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+      const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}, mid?: { shift?: boolean }) => {
@@ -1003,8 +1003,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+      const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
@@ -1087,8 +1087,8 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
-      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
-      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      const ox = rect.left + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).ox;
+      const oy = rect.top + viewOrigin(rect.width, rect.height, app.doc!, app.session, window.devicePixelRatio || 1).oy;
       return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {

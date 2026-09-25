@@ -363,8 +363,7 @@ export function drawEditor(
   if (!doc) return;
 
   const scale = session.zoom;
-  const ox = cssW / 2 + session.panX - (doc.width * scale) / 2;
-  const oy = cssH / 2 + session.panY - (doc.height * scale) / 2;
+  const { ox, oy } = viewOrigin(cssW, cssH, doc, session, dpr);
 
   // shadow under canvas
   ctx.fillStyle = cssVar("--shadow", "rgba(0,0,0,0.35)");
@@ -433,12 +432,22 @@ export function screenToDoc(
 ): { x: number; y: number } {
   const rect = view.getBoundingClientRect();
   const scale = session.zoom;
-  const ox = rect.width / 2 + session.panX - (doc.width * scale) / 2;
-  const oy = rect.height / 2 + session.panY - (doc.height * scale) / 2;
+  const { ox, oy } = viewOrigin(rect.width, rect.height, doc, session, window.devicePixelRatio || 1);
   return {
     x: (clientX - rect.left - ox) / scale,
     y: (clientY - rect.top - oy) / scale,
   };
+}
+
+/**
+ * Where the document's top-left lands in the view (CSS px), snapped to whole device pixels
+ * so pixels are never resampled at 100 % and the on-canvas editor lines up exactly.
+ */
+export function viewOrigin(cssW: number, cssH: number, doc: DocumentState, session: SessionState, dpr: number): { ox: number; oy: number } {
+  const scale = session.zoom;
+  const ox = cssW / 2 + session.panX - (doc.width * scale) / 2;
+  const oy = cssH / 2 + session.panY - (doc.height * scale) / 2;
+  return { ox: Math.round(ox * dpr) / dpr, oy: Math.round(oy * dpr) / dpr };
 }
 
 export function fitZoom(doc: DocumentState, view: HTMLCanvasElement): number {

@@ -721,7 +721,7 @@ export function textNaturalSize(layer: Layer): { w: number; h: number } {
     maxW = Math.max(maxW, w);
   }
   const pad = textPad(t);
-  // Compositor: the measured width plus a caret's worth (10 % of the size), at least one line tall.
+  // Compositor: the measured width plus a caret's worth (10 % of the size); every line is one line height tall.
   return { w: Math.max(16, Math.ceil(maxW + pad * 2 + t.fontSize * 0.1)), h: Math.max(16, Math.ceil(Math.max(1, lines.length) * t.fontSize * t.lineHeight + pad * 2)) };
 }
 
@@ -806,6 +806,7 @@ export function drawTextLayer(layer: Layer): void {
   const lineH = t.fontSize * t.lineHeight;
   const inner = natural.w - pad * 2;
   const x = t.align === "center" ? inner / 2 : t.align === "right" ? inner : 0;
+  ctx.translate(0, (lineH - t.fontSize) / 2); // the glyphs sit centred in their line box (half-leading above), as the editor lays them out
   lines.forEach((line, i) => {
     if (t.letterSpacing) {
       // approximate letter-spacing
