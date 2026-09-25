@@ -10,7 +10,7 @@ import { PAINT_TOOLS, cursorForTool } from "./cursors";
 import { icon, iconEl } from "./icons";
 import { THEME_CHOICES, applyThemeChoice, themeChoice } from "../theme/omarchy";
 import type { IconName } from "./icons";
-import { cssFont } from "../core/pixels";
+import { cssFont, textScale } from "../core/pixels";
 import { GRADIENT_PRESETS, gradientCss, gradientStops } from "../core/gradient";
 import type { GradientStyle } from "../core/gradient";
 
@@ -523,9 +523,11 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     const s = textEditor.style;
     s.left = `${ox + tr.x * z}px`;
     s.top = `${oy + tr.y * z}px`;
-    s.width = `${Math.max(tr.width * z, t.fontSize * z)}px`;
-    s.height = `${Math.max(tr.height * z, t.fontSize * t.lineHeight * z)}px`;
-    s.transform = `rotate(${tr.rotation}deg)`;
+    const { sx, sy } = textScale(layer); // type stretched by the handles keeps its ratio while editing
+    s.width = `${Math.max(tr.width / sx * z, t.fontSize * z)}px`;
+    s.height = `${Math.max(tr.height / sy * z, t.fontSize * t.lineHeight * z)}px`;
+    s.transformOrigin = "0 0";
+    s.transform = `translate(${(tr.width * z) / 2}px, ${(tr.height * z) / 2}px) rotate(${tr.rotation}deg) translate(${(-tr.width * z) / 2}px, ${(-tr.height * z) / 2}px) scale(${sx}, ${sy})`;
     s.padding = `${pad}px`;
     s.font = cssFont({ weight: t.weight, fontSize: t.fontSize * z, fontFamily: t.fontFamily });
     s.lineHeight = `${t.fontSize * t.lineHeight * z}px`;

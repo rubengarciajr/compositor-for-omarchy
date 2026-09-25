@@ -109,6 +109,18 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     flattenDocument(app.doc!);
     const after = app.activeLayer!.transform.width;
     check("text layer grows with content", after > before, { before, after });
+    // Scaling type re-renders the glyphs instead of stretching the bitmap, and bakes into the font size.
+    const layer = app.activeLayer!;
+    const size0 = layer.text!.fontSize;
+    const tr = layer.transform;
+    app.setTransform({ width: tr.width * 2, height: tr.height * 2 });
+    flattenDocument(app.doc!);
+    check("scaled text rasterizes at its displayed size", Math.abs(layer.canvas!.width - tr.width) <= 1 && Math.abs(tr.width - after * 2) <= 1, { bitmap: layer.canvas!.width, transform: tr.width, expected: after * 2 });
+    (app as unknown as { bakeTextScale(): void }).bakeTextScale();
+    check("uniform scale becomes font size", layer.text!.fontSize === size0 * 2 && Math.abs(layer.transform.width - after * 2) <= 2, { fontSize: layer.text!.fontSize, width: layer.transform.width });
+    app.setText({ text: "Short" });
+    flattenDocument(app.doc!);
+    check("editing scaled text keeps its size", layer.text!.fontSize === size0 * 2 && layer.transform.width < after * 2, { fontSize: layer.text!.fontSize, width: layer.transform.width });
   }
   // Gradient tool creates its own layer and fills it along the drag; brush on a group makes a layer.
   {

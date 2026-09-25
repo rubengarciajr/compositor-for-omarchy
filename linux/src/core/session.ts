@@ -59,7 +59,7 @@ import {
 } from "./pixels";
 import { flattenDocument, flattenDocumentCopy, fitZoom, screenToDoc, ensureLayerBitmap, setEditingLayer, beginStroke, endStroke } from "../render/compositor";
 import { toLocal } from "./transform";
-import { fitTextLayer } from "./pixels";
+import { fitTextLayer, textNaturalSize, textScale } from "./pixels";
 import { loadGradientSettings, paintGradient, saveGradientSettings } from "./gradient";
 import type { GradientSettings } from "./gradient";
 
@@ -1529,6 +1529,7 @@ export class App {
     } else if (this.dragMode === "scale" || this.dragMode === "rotate") {
       this.transformStart = null;
       this.transformHandle = null;
+      if (this.dragMode === "scale") this.bakeTextScale();
       this.commit(this.dragMode === "scale" ? "Scale layer" : "Rotate layer");
     } else if (this.dragMode === "marquee" && this.marqueeStart) {
       const r = this.session.cropRect;
@@ -1799,14 +1800,36 @@ export class App {
     this.redraw();
   }
 
+  /**
+   * Scaling type with the handles changes its font size, as Photoshop's Free Transform does, so the
+   * Size field stays truthful and the glyphs are re-rendered rather than stretched. A non-uniform
+   * stretch keeps its ratio (the bitmap is still rasterized at the displayed size).
+   */
+  private bakeTextScale(): void {
+    const layer = this.activeLayer;
+    if (!layer?.text) return;
+    const { sx, sy } = textScale(layer);
+    const s = Math.abs(sx - sy) < 0.02 ? sx : Math.min(sx, sy);
+    if (Math.abs(s - 1) < 1e-3) return;
+    const t = layer.text;
+    const fontSize = Math.max(1, Math.round(t.fontSize * s));
+    const applied = fontSize / t.fontSize;
+    t.fontSize = fontSize;
+    t.letterSpacing = Math.round(t.letterSpacing * applied * 100) / 100;
+    if (layer.id === this.session.activeLayerId) Object.assign(this.session.text, { fontSize: t.fontSize, letterSpacing: t.letterSpacing });
+    writableLayer(layer);
+    fitTextLayer(layer, { sx: sx / applied, sy: sy / applied });
+  }
+
   /** Undo scaling and rotation: back to the bitmap's own size, no flips. */
   resetTransform(): void {
     const layer = this.activeLayer;
     if (!layer?.canvas) return;
     const c = layer.transform;
     const cx = c.x + c.width / 2, cy = c.y + c.height / 2;
-    const w = layer.kind === "text" ? c.width : layer.canvas.width;
-    const h = layer.kind === "text" ? c.height : layer.canvas.height;
+    const natural = layer.kind === "text" && layer.text ? textNaturalSize(layer) : null;
+    const w = natural ? natural.w : layer.canvas.width;
+    const h = natural ? natural.h : layer.canvas.height;
     layer.transform = { x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), width: w, height: h, rotation: 0, flipH: false, flipV: false };
     this.commit("Reset transform");
   }

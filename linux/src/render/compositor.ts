@@ -59,7 +59,7 @@ function layerImage(layer: Layer): LayerImage | null {
   let base = layer.canvas;
   if (!base) return null;
   if (layer.kind === "text" || layer.kind === "shape") {
-    const key = JSON.stringify(layer.kind === "text" ? layer.text : [layer.shape, layer.transform.width, layer.transform.height]);
+    const key = JSON.stringify(layer.kind === "text" ? [layer.text, Math.round(layer.transform.width), Math.round(layer.transform.height)] : [layer.shape, layer.transform.width, layer.transform.height]);
     if (vectorKeys.get(layer) !== key) {
       base = writableLayer(layer)!; // history may share the old raster
       if (layer.kind === "text") drawTextLayer(layer);

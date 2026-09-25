@@ -17,6 +17,9 @@ Brings the Linux port up to the features Compositor for macOS shipped between 1.
 - **Inner Glow** layer effect (format parity with the Mac app's `innerGlow`): rendered, saved and loaded.
 - **Quit or close while typing** (Compositor 1.3.1): the text is committed and the usual save prompt follows.
 
+### Fixed
+- **Scaled type stays sharp.** Dragging a text layer's handles used to stretch a bitmap rendered at the original font size, so enlarged text went blurry. Type is now re-rendered at its displayed size (bitmaps capped at 8192 px a side), and a uniform scale becomes the layer's font size when the drag ends, as in Photoshop's Free Transform, so the Size field and the on-canvas editor stay truthful. Editing scaled text keeps its size, and Reset Transform returns it to the font's natural size.
+
 ## 1.1.1 — 2026-09-23
 
 ### Changed

@@ -666,11 +666,17 @@ export function cssFont(t: { weight: number; fontSize: number; fontFamily: strin
   return `${t.weight} ${t.fontSize}px ${family}`;
 }
 
-/** Resize a text layer's bitmap (and transform) so the whole text fits, keeping its top-left in place. */
-export function fitTextLayer(layer: Layer): void {
-  if (!layer.text || !layer.canvas) return;
-  const t = layer.text;
-  const ctx = layer.canvas.getContext("2d")!;
+/** Natural (unscaled) size of each text layer's bitmap, so a scaled transform can be told apart from a re-fit. */
+const textNatural = new WeakMap<Layer, { w: number; h: number }>();
+
+/** Largest text bitmap we will rasterize; beyond this the transform stretches it (Photoshop-style budget). */
+const MAX_TEXT_SIDE = 8192;
+const MAX_TEXT_PIXELS = 32 * 1024 * 1024;
+
+/** Size the text needs at its font size, before any transform scaling. */
+export function textNaturalSize(layer: Layer): { w: number; h: number } {
+  const t = layer.text!;
+  const ctx = (layer.canvas ?? createCanvas(1, 1)).getContext("2d")!;
   ctx.font = cssFont(t);
   const lines = t.text.split("\n");
   let maxW = 1;
@@ -682,23 +688,56 @@ export function fitTextLayer(layer: Layer): void {
     maxW = Math.max(maxW, w);
   }
   const pad = Math.ceil(t.fontSize * 0.25);
-  const w = Math.ceil(maxW + pad * 2);
-  const h = Math.ceil(lines.length * t.fontSize * t.lineHeight + pad * 2);
-  if (layer.canvas.width !== w || layer.canvas.height !== h) {
-    layer.canvas.width = w;
-    layer.canvas.height = h;
+  return { w: Math.ceil(maxW + pad * 2), h: Math.ceil(lines.length * t.fontSize * t.lineHeight + pad * 2) };
+}
+
+/** How much the transform stretches a text layer beyond its font size (1 = unscaled). */
+export function textScale(layer: Layer): { sx: number; sy: number } {
+  if (!layer.text) return { sx: 1, sy: 1 };
+  const n = textNatural.get(layer) ?? textNaturalSize(layer);
+  return { sx: layer.transform.width / n.w, sy: layer.transform.height / n.h };
+}
+
+/**
+ * Resize a text layer's bitmap (and transform) so the whole text fits, keeping its top-left in place.
+ * A transform that was scaled (by the handles, or loaded from disk) keeps its scale: the transform
+ * becomes natural size × scale and the bitmap is rasterized at that size, so scaled type stays sharp.
+ */
+export function fitTextLayer(layer: Layer, scale?: { sx: number; sy: number }): void {
+  if (!layer.text || !layer.canvas) return;
+  const natural = textNaturalSize(layer);
+  const prev = textNatural.get(layer);
+  const tr = layer.transform;
+  let sx = 1, sy = 1;
+  if (scale) { sx = scale.sx; sy = scale.sy; }
+  else if (prev) { sx = tr.width / prev.w; sy = tr.height / prev.h; }
+  else if (tr.width > 1 && tr.height > 1) { sx = tr.width / natural.w; sy = tr.height / natural.h; }
+  if (!(sx > 0) || !isFinite(sx)) sx = 1;
+  if (!(sy > 0) || !isFinite(sy)) sy = 1;
+  textNatural.set(layer, natural);
+  tr.width = natural.w * sx;
+  tr.height = natural.h * sy;
+  // Bitmap at the displayed size, capped so a huge headline cannot eat memory.
+  let bw = Math.max(1, Math.round(natural.w * sx));
+  let bh = Math.max(1, Math.round(natural.h * sy));
+  const shrink = Math.min(1, MAX_TEXT_SIDE / bw, MAX_TEXT_SIDE / bh, Math.sqrt(MAX_TEXT_PIXELS / (bw * bh)));
+  if (shrink < 1) { bw = Math.max(1, Math.floor(bw * shrink)); bh = Math.max(1, Math.floor(bh * shrink)); }
+  if (layer.canvas.width !== bw || layer.canvas.height !== bh) {
+    layer.canvas.width = bw;
+    layer.canvas.height = bh;
   }
-  layer.transform.width = w;
-  layer.transform.height = h;
 }
 
 export function drawTextLayer(layer: Layer): void {
   if (!layer.text || !layer.canvas) return;
   fitTextLayer(layer);
   const { text: t, canvas } = layer;
+  const natural = textNatural.get(layer)!;
   const ctx = canvas.getContext("2d")!;
   const pad = Math.ceil(t.fontSize * 0.25);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.scale(canvas.width / natural.w, canvas.height / natural.h); // glyphs are laid out in natural units
   ctx.translate(pad, pad);
   ctx.fillStyle = t.color;
   ctx.font = cssFont(t);
@@ -706,7 +745,7 @@ export function drawTextLayer(layer: Layer): void {
   ctx.textBaseline = "top";
   const lines = t.text.split("\n");
   const lineH = t.fontSize * t.lineHeight;
-  const inner = canvas.width - pad * 2;
+  const inner = natural.w - pad * 2;
   const x = t.align === "center" ? inner / 2 : t.align === "right" ? inner : 0;
   lines.forEach((line, i) => {
     if (t.letterSpacing) {
