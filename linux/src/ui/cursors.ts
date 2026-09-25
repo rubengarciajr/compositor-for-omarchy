@@ -45,13 +45,30 @@ const crosshair = (sign: "+" | "-") => svgCursor(
 export const SELECT_ADD_CURSOR = crosshair("+");
 export const SELECT_SUBTRACT_CURSOR = crosshair("-");
 
+/** Compositor's Move cursor: the arrow with a four-way badge at its lower right. */
+const ARROW = '<path d="M4 3v16.5l3.9-3.7 2.7 6.2 2.6-1.1-2.6-6.1h5.2z"';
+export const MOVE_CURSOR = svgCursor(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">${ARROW} fill="#000" stroke="#fff" stroke-width="2.2" stroke-linejoin="round" paint-order="stroke"/><g transform="translate(20.5,22.5)" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"><path d="M-6.5 0h13M0-6.5v13M-6.5 0l2.5-2.5M-6.5 0l2.5 2.5M6.5 0l-2.5-2.5M6.5 0l-2.5 2.5M0-6.5l-2.5 2.5M0-6.5l2.5 2.5M0 6.5l-2.5-2.5M0 6.5l2.5-2.5"/></g><g transform="translate(20.5,22.5)" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M-6.5 0h13M0-6.5v13M-6.5 0l2.5-2.5M-6.5 0l2.5 2.5M6.5 0l-2.5-2.5M6.5 0l-2.5 2.5M0-6.5l-2.5 2.5M0-6.5l2.5 2.5M0 6.5l-2.5-2.5M0 6.5l2.5-2.5"/></g></svg>`,
+  4, 3, "move",
+);
+/** Option over a layer: a black arrow over a white one, offset behind it (duplicate). */
+export const DUPLICATE_CURSOR = svgCursor(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="32" viewBox="0 0 28 32"><g transform="translate(5,5)">${ARROW} fill="#fff" stroke="#000" stroke-width="2.2" stroke-linejoin="round" paint-order="stroke"/></g>${ARROW} fill="#000" stroke="#fff" stroke-width="2.2" stroke-linejoin="round" paint-order="stroke"/></svg>`,
+  4, 3, "copy",
+);
+/** Over the rotation knob: two arrows chasing each other around a circle. */
+export const ROTATE_CURSOR = svgCursor(
+  `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"><g fill="none" stroke="#fff" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.5 9.5A7 7 0 0 0 6 7.5M5.5 14.5A7 7 0 0 0 18 16.5"/><path d="M14.5 9.5h4V5.5M9.5 14.5h-4v4"/></g><g fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18.5 9.5A7 7 0 0 0 6 7.5M5.5 14.5A7 7 0 0 0 18 16.5"/><path d="M14.5 9.5h4V5.5M9.5 14.5h-4v4"/></g></svg>`,
+  12, 12, "grab",
+);
+
 export interface CursorContext { tool: ToolId; shift: boolean; alt: boolean; dragging: boolean; space?: boolean }
 
 export function cursorForTool({ tool, shift, alt, dragging, space }: CursorContext): string {
   if (space) return dragging ? "grabbing" : "grab"; // Space: temporary Hand with any tool
   switch (tool) {
     case "idle": return "default";
-    case "move": return "move"; // refined per hit (handles / rotate) by the caller
+    case "move": return alt ? DUPLICATE_CURSOR : MOVE_CURSOR; // refined per hit (handles / rotate) by the caller
     case "hand": return dragging ? "grabbing" : "grab";
     case "zoom": return shift || alt ? ZOOM_OUT_CURSOR : ZOOM_IN_CURSOR;
     case "type": return "text";

@@ -738,3 +738,6 @@ input[type="number"], input[type="text"], select {
 .layer-row .thumb.mask.off { opacity: 0.45; }
 .layer-row .thumb.target { outline: 2px solid var(--accent); outline-offset: 1px; }
 .tool-header .divider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+.tool-header .transform-fields { display: contents; }
+.tool-header .transform-fields.disabled { opacity: 0.5; pointer-events: none; }
+.tool-header .icon-btn.toggle.active { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }

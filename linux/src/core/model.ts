@@ -64,6 +64,8 @@ export type MarqueeShape = "rect" | "ellipse";
 export type LassoMode = "free" | "polygon";
 export type ShapeKind = "rect" | "rounded" | "ellipse" | "line";
 
+export type LayerSampling = "nearest" | "smooth" | "high";
+
 export interface Transform {
   x: number;
   y: number;
@@ -72,6 +74,8 @@ export interface Transform {
   rotation: number; // degrees
   flipH: boolean;
   flipV: boolean;
+  /** How the bitmap is resampled when drawn at its size (Compositor's Sampling picker). */
+  sampling?: LayerSampling;
 }
 
 export interface LayerMask {
@@ -222,6 +226,14 @@ export interface SessionState {
   clone: { aligned: boolean; sampleAll: boolean };
   /** The active layer's mask is the paint target (its thumbnail was clicked). */
   maskSelected: boolean;
+  /** Move tool: clicking the canvas picks the layer under the pointer (else hold Ctrl). */
+  transformAutoSelect: boolean;
+  /** Move tool: show the transform box and handles (Ctrl+H); hidden, any drag moves the layer. */
+  showTransformControls: boolean;
+  /** Move tool header: W and H (and Scale) change together. Shift inverts it while dragging. */
+  locksTransformRatio: boolean;
+  /** Accent lines drawn while a move snaps to guides, layers or the canvas. */
+  snapLines: { axis: "x" | "y"; pos: number }[];
   /** On a mask: paint white (reveal) instead of black (hide). */
   maskPaintWhite: boolean;
   foreground: string;

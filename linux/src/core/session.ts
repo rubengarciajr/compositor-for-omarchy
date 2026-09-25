@@ -29,13 +29,22 @@ function cropTransform(r: { x: number; y: number; w: number; h: number }): Trans
   return { x: r.x, y: r.y, width: r.w, height: r.h, rotation: 0, flipH: false, flipV: false };
 }
 
+/** Compositor's ToolDefaults: booleans remembered between launches under the "tool." prefix. */
+function readToolDefault(key: string, fallback: boolean): boolean {
+  try { const v = localStorage.getItem(`tool.${key}`); return v === null ? fallback : v === "true"; } catch { return fallback; }
+}
+export function writeToolDefault(key: string, value: boolean): void {
+  try { localStorage.setItem(`tool.${key}`, String(value)); } catch { /* private mode */ }
+}
+
 /** Photoshop's selection modifiers: Option subtracts, Shift adds, otherwise the header's Mode. */
 function selectionMode(e: { shiftKey?: boolean; altKey?: boolean }, choice: Selection["mode"] = "replace"): Selection["mode"] {
   if (e.altKey) return "subtract";
   if (e.shiftKey) return "add";
   return choice;
 }
-import { cursorFor, fromLocal, hitTest, rotateByPointer, scaleByHandle } from "./transform";
+import { cursorFor, fromLocal, hitTest, rotateByPointer, roundedTransform, scaleByHandle, snapMove, boxCorners } from "./transform";
+import type { SnapTarget } from "./transform";
 import { PROJECT_EXTENSION, PROJECT_MIME, buildProject, isProjectFile, parseProject, parseProjectFrom, serializeProject } from "../io/project";
 import { folderSource, urlFolderSource, zipFileSource } from "../io/package";
 import type { ProjectSource } from "../io/package";
@@ -57,7 +66,7 @@ import {
   canvasFromImageData,
   parseHex,
 } from "./pixels";
-import { BrushStroke, WarpStroke, layerInDocument, resizeLayerBitmap, docToLayer } from "./stroke";
+import { BrushStroke, WarpStroke, layerInDocument, resizeLayerBitmap, docToLayer, drawLayerInDocument } from "./stroke";
 import { selectionOutline } from "../render/ants";
 import type { StrokeMode, StrokeOptions, StrokeTip } from "./stroke";
 import { spotHeal } from "./heal";
@@ -117,6 +126,15 @@ export class App {
   private moveStart: { x: number; y: number } | null = null;
   private transformStart: Transform | null = null;
   private transformHandle: HandleSpec | null = null;
+  /**
+   * A transform being edited: non-persistent drags commit on release; ⌘T and typed values are
+   * persistent and wait for Apply / Return (Esc cancels without an undo step). A floating
+   * selection transform carries the lifted pixels on a temporary "Floating Selection" layer.
+   */
+  transformEdit: { layerId: string; original: Transform; persistent: boolean; floating?: { sourceId: string; sourceBefore: HTMLCanvasElement; originOutline: HTMLCanvasElement; feather: number; bounds: { x: number; y: number; w: number; h: number } } } | null = null;
+  /** Option was held at the press: the first drag movement duplicates the layer and moves the copy. */
+  private duplicateOnDrag = false;
+  private dragDuplicated = false;
   private pendingFit = true;
 
   /** How often watched packages are checked for outside changes (ms). */
@@ -134,6 +152,10 @@ export class App {
       clone: { aligned: true, sampleAll: false },
       maskSelected: false,
       maskPaintWhite: false,
+      transformAutoSelect: readToolDefault("autoSelect", false),
+      showTransformControls: readToolDefault("transformControls", true),
+      locksTransformRatio: true,
+      snapLines: [],
       foreground: "#000000",
       background: "#ffffff",
       marqueeShape: "rect",
@@ -937,6 +959,7 @@ export class App {
       }
     }
     if (before !== tool) this.cancelLasso(); // switching tools drops an outline in progress
+    if (before !== tool && this.transformEdit) this.commitTransform(); // and applies a pending transform
     this.session.tool = tool;
     if (tool === "crop" && this.doc?.selection?.mask && !this.session.cropRect) {
       // With a selection, the crop box starts at its bounds (Compositor 1.2.5).
@@ -1492,24 +1515,28 @@ export class App {
       return;
     }
     if (tool === "move") {
-      if (e.ctrlKey || e.metaKey) {
-        // Ctrl-click: auto-select the top-most layer with pixels under the pointer.
-        const hit = this.layerAt(p);
-        if (hit) this.selectLayer(hit.id, { toggle: e.shiftKey });
-      } else if (e.altKey && this.activeLayer) {
-        this.duplicateLayer(0); // Alt-drag moves a copy, starting in place
-      }
-      const layer = this.activeLayer;
-      if (layer && this.isTransformable(layer)) {
-        const hit = hitTest(layer.transform, p, this.session.zoom);
+      const active = this.activeLayer;
+      const controls = this.session.showTransformControls || !!this.transformEdit?.persistent;
+      if (active && this.isTransformable(active) && controls && this.session.selectedLayerIds.length <= 1) {
+        const hit = hitTest(active.transform, p, this.session.zoom);
         if (hit.kind === "handle" || hit.kind === "rotate") {
           this.dragMode = hit.kind === "handle" ? "scale" : "rotate";
-          this.transformStart = { ...layer.transform };
+          this.transformStart = { ...active.transform };
           this.transformHandle = hit.handle;
           this.moveStart = p;
+          if (!this.transformEdit) this.transformEdit = { layerId: active.id, original: { ...active.transform }, persistent: false };
           return;
         }
       }
+      const press = this.transformPressLayer(p, e);
+      if (press?.picked) {
+        if ((e.ctrlKey || e.metaKey) && e.shiftKey) this.extendSelection(press.id);
+        else this.selectLayer(press.id);
+      }
+      const layer = this.activeLayer;
+      if (layer && !this.transformEdit) this.transformEdit = { layerId: layer.id, original: { ...layer.transform }, persistent: false };
+      this.duplicateOnDrag = e.altKey && !this.transformEdit?.floating;
+      this.dragDuplicated = false;
       this.dragMode = "move";
       this.moveStart = p;
       this.moveOrigin = p;
@@ -1617,18 +1644,25 @@ export class App {
       const layer = this.activeLayer;
       if (!layer) return;
       if (this.dragMode === "scale" && this.transformHandle) {
-        const corner = this.transformHandle.hx !== 0 && this.transformHandle.hy !== 0;
-        layer.transform = scaleByHandle(this.transformStart, this.transformHandle, p, {
-          proportional: corner ? !e.shiftKey : e.shiftKey, // corners keep the ratio unless Shift; edges the opposite
+        layer.transform = roundedTransform(scaleByHandle(this.transformStart, this.transformHandle, p, {
+          proportional: this.session.locksTransformRatio !== e.shiftKey, // Shift inverts the link
           fromCenter: e.altKey,
-        });
+        }));
       } else {
-        layer.transform = rotateByPointer(this.transformStart, this.moveStart, p, e.shiftKey);
+        layer.transform = roundedTransform(rotateByPointer(this.transformStart, this.moveStart, p, e.shiftKey));
       }
       this.redraw();
       return;
     }
     if (this.dragMode === "move" && this.moveStart) {
+      if (this.duplicateOnDrag && !this.dragDuplicated) {
+        // Option-drag: the first movement duplicates the layer(s); the copy is what moves.
+        this.dragDuplicated = true;
+        this.transformEdit = null;
+        this.duplicateLayer(0);
+        const copy = this.activeLayer;
+        if (copy) this.transformEdit = { layerId: copy.id, original: { ...copy.transform }, persistent: false };
+      }
       const layer = this.activeLayer;
       if (!layer) return;
       // Shift constrains the drag to the dominant axis (measured from where it started).
@@ -1636,20 +1670,23 @@ export class App {
       let tx = p.x - origin.x, ty = p.y - origin.y;
       if (e.shiftKey) { if (Math.abs(tx) >= Math.abs(ty)) ty = 0; else tx = 0; }
       tx = Math.round(tx); ty = Math.round(ty); // move by whole pixels, as Photoshop does, so nothing gets resampled
+      const moving = this.session.selectedLayerIds.length > 1 ? this.session.selectedLayerIds : [layer.id];
+      // Snapping (Control bypasses it): the layer's box seeks guides, other layers and the canvas.
+      this.session.snapLines = [];
+      if (!e.ctrlKey && !e.metaKey && moving.length === 1 && this.isTransformable(layer)) {
+        const start = this.transformEdit?.layerId === layer.id ? this.transformEdit.original : layer.transform;
+        const proposed = { ...start, x: start.x + tx, y: start.y + ty };
+        const snapped = snapMove(proposed, this.snapTargets(moving), 10 / (this.session.zoom || 1));
+        tx = Math.round(snapped.transform.x - start.x);
+        ty = Math.round(snapped.transform.y - start.y);
+        this.session.snapLines = snapped.lines;
+      }
       const dx = tx - this.moveApplied.x;
       const dy = ty - this.moveApplied.y;
       this.moveApplied = { x: tx, y: ty };
-      if (this.session.selectedLayerIds.length > 1) {
-        for (const id of this.session.selectedLayerIds) {
-          const l = doc.layers.find((x) => x.id === id);
-          if (l) {
-            l.transform.x += dx;
-            l.transform.y += dy;
-          }
-        }
-      } else {
-        layer.transform.x += dx;
-        layer.transform.y += dy;
+      for (const id of moving) {
+        const l = doc.layers.find((x) => x.id === id);
+        if (l) { l.transform.x += dx; l.transform.y += dy; }
       }
       this.moveStart = p;
       this.redraw();
@@ -1955,13 +1992,15 @@ export class App {
       this.continueBrush(this.brushPointer ?? screenToDoc(_view, doc, this.session, e.clientX, e.clientY));
       this.finishBrush();
       return;
-    } else if (this.dragMode === "move") {
-      this.commit("Move layer");
-    } else if (this.dragMode === "scale" || this.dragMode === "rotate") {
+    } else if (this.dragMode === "move" || this.dragMode === "scale" || this.dragMode === "rotate") {
+      const moved = this.moveApplied.x !== 0 || this.moveApplied.y !== 0 || this.dragMode !== "move";
+      this.session.snapLines = [];
       this.transformStart = null;
       this.transformHandle = null;
-      if (this.dragMode === "scale") this.bakeTextScale();
-      this.commit(this.dragMode === "scale" ? "Scale layer" : "Rotate layer");
+      this.moveApplied = { x: 0, y: 0 };
+      if (this.transformEdit?.persistent) { this.redraw(); this.emitView(); }
+      else if (this.session.selectedLayerIds.length > 1 && this.dragMode === "move") { this.transformEdit = null; if (moved) this.commit("Transform Layers"); else this.emit(); }
+      else this.commitTransform(); // a plain drag commits on release
     } else if (this.dragMode === "select-move" && this.selectionMove) {
       const sm = this.selectionMove;
       this.selectionMove = null;
@@ -2364,20 +2403,252 @@ export class App {
       return hit.kind === "outside" ? "crosshair" : cursorFor(hit, 0);
     }
     if (this.session.tool !== "move") return "";
-    if (!layer || !this.isTransformable(layer)) return "move";
+    const controls = this.session.showTransformControls || !!this.transformEdit?.persistent;
+    if (!layer || !this.isTransformable(layer) || !controls) return e.altKey ? "duplicate" : "move";
     const p = screenToDoc(view, doc, this.session, e.clientX, e.clientY);
     const hit = hitTest(layer.transform, p, this.session.zoom);
-    return hit.kind === "outside" ? "move" : cursorFor(hit, layer.transform.rotation);
+    if (hit.kind === "rotate") return "rotate";
+    if (hit.kind === "handle") return cursorFor(hit, layer.transform.rotation);
+    return e.altKey ? "duplicate" : "move";
   }
 
-  /** Set transform fields from the Move tool header (live); commit on `change`. */
+  /** Typing in the Transform header starts a persistent edit (Apply / Return commits, Esc cancels). */
   setTransform(patch: Partial<Transform>): void {
     const layer = this.activeLayer;
-    if (!layer) return;
+    if (!layer || !this.isTransformable(layer)) return;
+    if (!this.transformEdit) this.transformEdit = { layerId: layer.id, original: { ...layer.transform }, persistent: true };
+    else if (!this.transformEdit.persistent) this.transformEdit.persistent = true;
     Object.assign(layer.transform, patch);
     layer.transform.width = Math.max(1, layer.transform.width);
     layer.transform.height = Math.max(1, layer.transform.height);
+    layer.transform.rotation = layer.transform.rotation % 360;
     this.redraw();
+    this.emitView();
+  }
+
+  /** The Move tool's W/H/Scale keep the ratio while the link is on. */
+  resizeTransform(width?: number, height?: number): void {
+    const layer = this.activeLayer;
+    if (!layer) return;
+    const t = layer.transform;
+    if (this.session.locksTransformRatio) {
+      const ratio = t.width / Math.max(1, t.height);
+      if (width !== undefined) this.setTransform({ width, height: Math.max(1, width / ratio) });
+      else if (height !== undefined) this.setTransform({ height, width: Math.max(1, height * ratio) });
+    } else this.setTransform({ ...(width !== undefined ? { width } : {}), ...(height !== undefined ? { height } : {}) });
+  }
+
+  /** Scale (%) relative to the bitmap's own pixel size, about the centre. */
+  setTransformScale(percent: number): void {
+    const layer = this.activeLayer;
+    if (!layer?.canvas) return;
+    const t = layer.transform;
+    const k = Math.max(0.001, percent / 100);
+    const w = layer.canvas.width * k, h = layer.canvas.height * k;
+    this.setTransform({ x: t.x + t.width / 2 - w / 2, y: t.y + t.height / 2 - h / 2, width: w, height: h });
+  }
+
+  transformScalePercent(layer: Layer = this.activeLayer!): number {
+    if (!layer?.canvas) return 100;
+    return (layer.transform.width / Math.max(1, layer.canvas.width)) * 100;
+  }
+
+  /** Edit › Transform Layer / Transform Selection (⌘T). */
+  transformCommand(): void {
+    if (this.canTransformSelection()) this.beginSelectionTransform();
+    else this.beginTransform(true);
+  }
+
+  beginTransform(persistent = true): void {
+    const layer = this.activeLayer;
+    if (!layer || !this.isTransformable(layer)) return;
+    if (this.session.tool !== "move") this.setTool("move");
+    if (!this.transformEdit) this.transformEdit = { layerId: layer.id, original: { ...layer.transform }, persistent };
+    else this.transformEdit.persistent = this.transformEdit.persistent || persistent;
+    this.emitView();
+  }
+
+  /** Apply / Return: keep the edited transform as one undo step (nothing changed: no step). */
+  commitTransform(): void {
+    const doc = this.doc;
+    const edit = this.transformEdit;
+    this.transformEdit = null;
+    if (!doc || !edit) return;
+    const layer = doc.layers.find((l) => l.id === edit.layerId);
+    if (!layer) { this.emit(); return; }
+    const t = layer.transform, o = edit.original;
+    const changed = t.x !== o.x || t.y !== o.y || t.width !== o.width || t.height !== o.height || t.rotation !== o.rotation || t.flipH !== o.flipH || t.flipV !== o.flipV || t.sampling !== o.sampling;
+    if (edit.floating) { this.mergeFloatingTransform(edit, changed); return; }
+    if (!changed) { this.emit(); return; }
+    if (t.width !== o.width || t.height !== o.height) this.bakeTextScale();
+    this.commit("Transform Layer");
+  }
+
+  /** Esc: back to how the layer was, with no undo step. */
+  cancelTransform(): void {
+    const doc = this.doc;
+    const edit = this.transformEdit;
+    this.transformEdit = null;
+    this.dragMode = "none";
+    if (!doc || !edit) return;
+    if (edit.floating) { this.cancelFloatingTransform(edit); return; }
+    const layer = doc.layers.find((l) => l.id === edit.layerId);
+    if (layer) layer.transform = { ...edit.original };
+    this.emit();
+  }
+
+  canTransformSelection(): boolean {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    return !!doc?.selection?.mask && !this.isSelectionEmpty() && !this.transformEdit && !this.session.maskSelected && !!layer?.canvas && layer.kind !== "group" && layer.kind !== "adjustment";
+  }
+
+  /** ⌘T with a selection: the selected pixels float on their own layer while you transform them. */
+  beginSelectionTransform(): void {
+    const doc = this.doc;
+    const source = this.activeLayer;
+    if (!doc || !source?.canvas || !this.canTransformSelection()) return;
+    const lifted = this.cutout(false);
+    if (!lifted) return;
+    const sourceBefore = source.canvas;
+    const originOutline = doc.selection!.outline ?? doc.selection!.mask!;
+    const feather = doc.selection?.feather ?? 0;
+    this.eraseSelection(source);
+    const floating = createLayer({ name: "Floating Selection", kind: "raster", canvas: lifted.canvas, transform: defaultTransform(lifted.bounds.w, lifted.bounds.h, lifted.bounds.x, lifted.bounds.y) });
+    floating.opacity = source.opacity;
+    floating.blendMode = source.blendMode;
+    this.insertLayerAboveActive(floating);
+    if (this.session.tool !== "move") this.session.tool = "move";
+    this.transformEdit = { layerId: floating.id, original: { ...floating.transform }, persistent: true, floating: { sourceId: source.id, sourceBefore, originOutline, feather, bounds: lifted.bounds } };
+    this.emit();
+  }
+
+  private cancelFloatingTransform(edit: NonNullable<App["transformEdit"]>): void {
+    const doc = this.doc!;
+    const f = edit.floating!;
+    const source = doc.layers.find((l) => l.id === f.sourceId);
+    doc.layers = doc.layers.filter((l) => l.id !== edit.layerId);
+    if (source) source.canvas = f.sourceBefore;
+    doc.selection = this.featheredSelection(f.originOutline, f.feather);
+    this.session.activeLayerId = f.sourceId;
+    this.session.selectedLayerIds = [f.sourceId];
+    this.emit();
+  }
+
+  private mergeFloatingTransform(edit: NonNullable<App["transformEdit"]>, changed: boolean): void {
+    const doc = this.doc!;
+    const f = edit.floating!;
+    if (!changed) { this.cancelFloatingTransform(edit); return; } // untouched: exactly as before, soft edges intact
+    const source = doc.layers.find((l) => l.id === f.sourceId);
+    const floating = doc.layers.find((l) => l.id === edit.layerId);
+    doc.layers = doc.layers.filter((l) => l.id !== edit.layerId);
+    this.session.activeLayerId = f.sourceId;
+    this.session.selectedLayerIds = [f.sourceId];
+    if (!source?.canvas || !floating?.canvas) { this.emit(); return; }
+    // Grow the source where the pixels now extend past it, then draw them in place.
+    const c = source.canvas;
+    const corners = boxCorners(floating.transform).map((q) => docToLayer(source.transform, c.width, c.height, q));
+    const lx0 = Math.floor(Math.min(...corners.map((q) => q.x))), ly0 = Math.floor(Math.min(...corners.map((q) => q.y)));
+    const lx1 = Math.ceil(Math.max(...corners.map((q) => q.x))), ly1 = Math.ceil(Math.max(...corners.map((q) => q.y)));
+    writableLayer(source);
+    resizeLayerBitmap(source, Math.max(0, -lx0), Math.max(0, -ly0), Math.max(0, lx1 - c.width), Math.max(0, ly1 - c.height));
+    const ctx = source.canvas!.getContext("2d")!;
+    enterDocSpace(ctx, source);
+    drawLayerInDocument(ctx, floating);
+    ctx.restore();
+    // The selection follows the pixels: the original outline mapped through the same transform.
+    const b = f.bounds;
+    const outline = createCanvas(doc.width, doc.height);
+    const octx = outline.getContext("2d")!;
+    const t = floating.transform;
+    octx.translate(t.x + t.width / 2, t.y + t.height / 2);
+    octx.rotate((t.rotation * Math.PI) / 180);
+    octx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
+    octx.drawImage(f.originOutline, b.x, b.y, b.w, b.h, -t.width / 2, -t.height / 2, t.width, t.height);
+    thresholdMask(outline);
+    doc.selection = this.featheredSelection(outline, f.feather);
+    this.commit("Transform Selection");
+  }
+
+  /** ⌘⇧-click with the Move tool: add the layer to (or drop it from) the multi-selection. */
+  extendSelection(id: string): void {
+    const sel = new Set(this.session.selectedLayerIds);
+    if (sel.has(id) && sel.size > 1) sel.delete(id); else sel.add(id);
+    this.session.selectedLayerIds = [...sel];
+    this.session.activeLayerId = id;
+    this.emitView();
+  }
+
+  /** ⌘] / ⌘[: move the active layer one step up or down among its siblings. */
+  moveLayerOrder(delta: 1 | -1): void {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    if (!doc || !layer) return;
+    const siblings = doc.layers.filter((l) => l.parentId === layer.parentId);
+    const i = siblings.indexOf(layer);
+    const target = siblings[i + delta];
+    if (!target) return;
+    const block = [layer, ...(layer.kind === "group" ? descendants(doc, layer.id) : [])];
+    const targetBlock = [target, ...(target.kind === "group" ? descendants(doc, target.id) : [])];
+    doc.layers = doc.layers.filter((l) => !block.includes(l));
+    const at = delta > 0 ? doc.layers.indexOf(targetBlock[targetBlock.length - 1]) + 1 : doc.layers.indexOf(target);
+    doc.layers.splice(at, 0, ...block);
+    this.commit(delta > 0 ? "Move Layer Up" : "Move Layer Down");
+  }
+
+  /** Ctrl+H: show or hide the transform box and handles (remembered). */
+  toggleTransformControls(): void {
+    this.session.showTransformControls = !this.session.showTransformControls;
+    writeToolDefault("transformControls", this.session.showTransformControls);
+    this.emitView();
+  }
+
+  setAutoSelect(on: boolean): void {
+    this.session.transformAutoSelect = on;
+    writeToolDefault("autoSelect", on);
+    this.emitView();
+  }
+
+  /**
+   * Which layer a Move-tool press acts on (Compositor's transformPressLayer): a press need
+   * not land inside the layer; Auto Select or Ctrl picks the layer under the pointer, and
+   * Auto Select prefers a layer stacked above a selected full-canvas background.
+   */
+  private transformPressLayer(p: { x: number; y: number }, e: PointerEvent): { id: string; picked: boolean } | null {
+    const doc = this.doc;
+    if (!doc) return null;
+    const under = this.layerAt(p);
+    const active = this.activeLayer && this.isTransformable(this.activeLayer) && this.activeLayer.visible ? this.activeLayer : null;
+    const picks = !this.transformEdit;
+    const cmd = e.ctrlKey || e.metaKey;
+    const auto = this.session.transformAutoSelect;
+    if (cmd && picks && under) return { id: under.id, picked: true };
+    if (active) {
+      const l = toLocal(active.transform, p);
+      if (Math.abs(l.x) <= active.transform.width / 2 && Math.abs(l.y) <= active.transform.height / 2) {
+        if (picks && auto && under && under.id !== active.id && doc.layers.indexOf(under) > doc.layers.indexOf(active)) return { id: under.id, picked: true };
+        return { id: active.id, picked: false };
+      }
+    }
+    if (picks && (auto || cmd) && under) return { id: under.id, picked: true };
+    return active ? { id: active.id, picked: false } : under ? { id: under.id, picked: true } : null;
+  }
+
+  /** Snap targets for a moving layer: the canvas edges and centre, guides, and other visible layers' boxes. */
+  private snapTargets(movingIds: string[]): SnapTarget[] {
+    const doc = this.doc!;
+    const out: SnapTarget[] = [
+      { axis: "x", pos: 0 }, { axis: "x", pos: doc.width / 2 }, { axis: "x", pos: doc.width },
+      { axis: "y", pos: 0 }, { axis: "y", pos: doc.height / 2 }, { axis: "y", pos: doc.height },
+    ];
+    for (const g of doc.guides) out.push({ axis: g.axis, pos: g.pos });
+    for (const l of doc.layers) {
+      if (movingIds.includes(l.id) || !l.visible || l.kind === "group" || l.kind === "adjustment" || !l.canvas) continue;
+      const xs = boxCorners(l.transform).map((c) => c.x), ys = boxCorners(l.transform).map((c) => c.y);
+      const x0 = Math.round(Math.min(...xs)), x1 = Math.round(Math.max(...xs)), y0 = Math.round(Math.min(...ys)), y1 = Math.round(Math.max(...ys));
+      out.push({ axis: "x", pos: x0 }, { axis: "x", pos: (x0 + x1) / 2 }, { axis: "x", pos: x1 }, { axis: "y", pos: y0 }, { axis: "y", pos: (y0 + y1) / 2 }, { axis: "y", pos: y1 });
+    }
+    return out;
   }
 
   /**

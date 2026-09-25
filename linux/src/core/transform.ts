@@ -57,29 +57,49 @@ export function handlePositions(t: Transform): Handle[] {
   return HANDLES.map((h) => ({ ...h, ...fromLocal(t, { x: (h.hx * t.width) / 2, y: (h.hy * t.height) / 2 }) }));
 }
 
+/** Screen distance of the rotation knob beyond the top-centre handle (Compositor: 28 pt). */
+export const ROTATION_HANDLE_OFFSET = 28;
+
+/** Where the rotation knob sits: 28 screen pixels beyond the top-centre handle, along the box's outward normal. */
+export function rotationHandle(t: Transform, zoom: number): { x: number; y: number } {
+  return fromLocal(t, { x: 0, y: -t.height / 2 - ROTATION_HANDLE_OFFSET / zoom });
+}
+
 /**
- * What a document-space pointer position is over. `zoom` converts document units to
- * screen pixels so handle size and the rotation band stay constant on screen.
+ * What a document-space pointer position is over, as Compositor's TransformOverlayGeometry
+ * decides it: the rotation knob within `handlePx`, then any handle within `handlePx`, then
+ * an edge within `handlePx` (which counts as that edge's middle handle), then inside.
+ * `rotateBandPx` of 0 hides the rotation knob (crop boxes).
  */
-export function hitTest(t: Transform, p: { x: number; y: number }, zoom: number, handlePx = 7, rotateBandPx = 22): Hit {
+export function hitTest(t: Transform, p: { x: number; y: number }, zoom: number, handlePx = 10, rotateBandPx = 1): Hit {
   const tol = handlePx / zoom;
   const handles = handlePositions(t);
+  const top = handles.find((h) => h.id === "n")!;
+  if (rotateBandPx > 0) {
+    const knob = rotationHandle(t, zoom);
+    if (Math.hypot(p.x - knob.x, p.y - knob.y) <= tol) return { kind: "rotate", handle: top };
+  }
   let best: Handle | null = null, bestD = Infinity;
   for (const h of handles) {
     const d = Math.hypot(p.x - h.x, p.y - h.y);
     if (d <= tol && d < bestD) { best = h; bestD = d; }
   }
   if (best) return { kind: "handle", handle: best };
+  // Along an edge: the edge's middle handle.
+  const corners = boxCorners(t); // nw, ne, se, sw
+  const edges: [number, number, HandleId][] = [[0, 1, "n"], [1, 2, "e"], [2, 3, "s"], [3, 0, "w"]];
+  for (const [a, b, id] of edges) {
+    const ax = corners[a].x, ay = corners[a].y, bx = corners[b].x, by = corners[b].y;
+    const len2 = (bx - ax) ** 2 + (by - ay) ** 2;
+    if (len2 <= 0) continue;
+    const u = ((p.x - ax) * (bx - ax) + (p.y - ay) * (by - ay)) / len2;
+    if (u < 0 || u > 1) continue;
+    const d = Math.hypot(p.x - (ax + (bx - ax) * u), p.y - (ay + (by - ay) * u));
+    if (d <= tol) return { kind: "handle", handle: handles.find((h) => h.id === id)! };
+  }
   const l = toLocal(t, p);
   const inside = Math.abs(l.x) <= t.width / 2 && Math.abs(l.y) <= t.height / 2;
-  if (inside) return { kind: "inside" };
-  // Just outside a corner: rotate.
-  const band = rotateBandPx / zoom;
-  for (const h of handles) {
-    if (h.hx === 0 || h.hy === 0) continue;
-    if (Math.hypot(p.x - h.x, p.y - h.y) <= band) return { kind: "rotate", handle: h };
-  }
-  return { kind: "outside" };
+  return inside ? { kind: "inside" } : { kind: "outside" };
 }
 
 export interface ScaleOptions {
@@ -99,13 +119,19 @@ export function scaleByHandle(start: Transform, handle: HandleSpec, p: { x: numb
   const hx0 = (handle.hx * w0) / 2, hy0 = (handle.hy * h0) / 2;
 
   let w = w0, h = h0;
+  // Dragging a handle past the opposite side flips the layer on that axis instead of stopping.
+  let flipH = start.flipH, flipV = start.flipV;
+  if (handle.hx !== 0 && Math.sign(l.x - ax) === -handle.hx && l.x !== ax) flipH = !flipH;
+  if (handle.hy !== 0 && Math.sign(l.y - ay) === -handle.hy && l.y !== ay) flipV = !flipV;
   if (opts.proportional && handle.hx !== 0 && handle.hy !== 0) {
     // Project the pointer onto the anchor→handle diagonal.
     const dx = hx0 - ax, dy = hy0 - ay;
     const s = ((l.x - ax) * dx + (l.y - ay) * dy) / (dx * dx + dy * dy);
-    const k = Math.max(0.01, s);
+    const k = Math.max(0.01, Math.abs(s));
     w = w0 * k;
     h = h0 * k;
+    flipH = start.flipH; flipV = start.flipV;
+    if (s < 0) { flipH = !flipH; flipV = !flipV; }
   } else {
     if (handle.hx !== 0) w = Math.abs(l.x - ax) * (opts.fromCenter ? 2 : 1);
     if (handle.hy !== 0) h = Math.abs(l.y - ay) * (opts.fromCenter ? 2 : 1);
@@ -119,14 +145,55 @@ export function scaleByHandle(start: Transform, handle: HandleSpec, p: { x: numb
   w = Math.max(1, w);
   h = Math.max(1, h);
 
-  // Keep the anchor fixed: new local centre relative to the old one.
-  const cx = opts.fromCenter ? 0 : ax + (handle.hx * w) / 2 * (handle.hx !== 0 || opts.proportional ? 1 : 0);
-  const cy = opts.fromCenter ? 0 : ay + (handle.hy * h) / 2 * (handle.hy !== 0 || opts.proportional ? 1 : 0);
+  // Keep the anchor fixed: new local centre relative to the old one (mirrored when flipped past it).
+  const dirX = flipH !== start.flipH ? -handle.hx : handle.hx;
+  const dirY = flipV !== start.flipV ? -handle.hy : handle.hy;
+  const cx = opts.fromCenter ? 0 : ax + (dirX * w) / 2 * (handle.hx !== 0 || opts.proportional ? 1 : 0);
+  const cy = opts.fromCenter ? 0 : ay + (dirY * h) / 2 * (handle.hy !== 0 || opts.proportional ? 1 : 0);
   // Axes the handle does not touch keep their centre at 0 (unless proportional moved them).
   const lcx = handle.hx === 0 && !opts.proportional ? 0 : cx;
   const lcy = handle.hy === 0 && !opts.proportional ? 0 : cy;
   const c = fromLocal(start, { x: lcx, y: lcy });
-  return { ...start, x: c.x - w / 2, y: c.y - h / 2, width: w, height: h };
+  return { ...start, x: c.x - w / 2, y: c.y - h / 2, width: w, height: h, flipH, flipV };
+}
+
+/** Compositor commits drags on whole pixels and whole degrees (typed values stay exact). */
+export function roundedTransform(t: Transform): Transform {
+  return { ...t, x: Math.round(t.x), y: Math.round(t.y), width: Math.max(1, Math.round(t.width)), height: Math.max(1, Math.round(t.height)), rotation: Math.round(t.rotation) };
+}
+
+export interface SnapTarget { axis: "x" | "y"; pos: number }
+
+/**
+ * Snap a moving box: on each axis independently, whichever of its min / mid / max lands
+ * nearest a target within `tolerance` wins. Returns the shifted box and the lines that matched.
+ */
+export function snapMove(t: Transform, targets: SnapTarget[], tolerance: number): { transform: Transform; lines: SnapTarget[] } {
+  const corners = boxCorners(t);
+  const xs = corners.map((c) => c.x), ys = corners.map((c) => c.y);
+  const box = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+  const lines: SnapTarget[] = [];
+  let dx = 0, dy = 0, bestX = tolerance, bestY = tolerance;
+  for (const s of targets) {
+    if (s.axis === "x") {
+      for (const v of [box.minX, (box.minX + box.maxX) / 2, box.maxX]) {
+        const d = Math.abs(s.pos - v);
+        if (d < bestX) { bestX = d; dx = s.pos - v; }
+      }
+    } else {
+      for (const v of [box.minY, (box.minY + box.maxY) / 2, box.maxY]) {
+        const d = Math.abs(s.pos - v);
+        if (d < bestY) { bestY = d; dy = s.pos - v; }
+      }
+    }
+  }
+  if (bestX < tolerance) lines.push({ axis: "x", pos: Math.round((box.minX + dx) * 1000) / 1000 });
+  if (bestY < tolerance) lines.push({ axis: "y", pos: Math.round((box.minY + dy) * 1000) / 1000 });
+  // Report the matched target positions rather than the box edges.
+  const matched: SnapTarget[] = [];
+  if (bestX < tolerance) { const nb = { minX: box.minX + dx, maxX: box.maxX + dx }; matched.push(...targets.filter((s) => s.axis === "x" && [nb.minX, (nb.minX + nb.maxX) / 2, nb.maxX].some((v) => Math.abs(v - s.pos) < 1e-6))); }
+  if (bestY < tolerance) { const nb = { minY: box.minY + dy, maxY: box.maxY + dy }; matched.push(...targets.filter((s) => s.axis === "y" && [nb.minY, (nb.minY + nb.maxY) / 2, nb.maxY].some((v) => Math.abs(v - s.pos) < 1e-6))); }
+  return { transform: { ...t, x: t.x + dx, y: t.y + dy }, lines: matched };
 }
 
 /** Rotation for a pointer at `p`, given where the drag started. Shift snaps to 15°. */

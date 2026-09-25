@@ -104,13 +104,13 @@ function effectsFromRecord(rec: Record<string, unknown> | undefined): LayerEffec
 }
 
 function transformRecord(t: Transform): ManifestTransform {
-  return { origin: [t.x, t.y], size: [t.width, t.height], rotation: t.rotation, flipX: t.flipH, flipY: t.flipV, sampling: "High quality" };
+  return { origin: [t.x, t.y], size: [t.width, t.height], rotation: t.rotation, flipX: t.flipH, flipY: t.flipV, sampling: t.sampling === "nearest" ? "Nearest" : t.sampling === "smooth" ? "Smooth" : "High quality" };
 }
 function transformFrom(m: ManifestTransform | undefined, w: number, h: number): Transform {
   if (!m) return defaultTransform(w, h);
   const [x, y] = m.origin ?? [0, 0];
   const [width, height] = m.size ?? [w, h];
-  return { x, y, width, height, rotation: m.rotation ?? 0, flipH: !!m.flipX, flipV: !!m.flipY };
+  return { x, y, width, height, rotation: m.rotation ?? 0, flipH: !!m.flipX, flipV: !!m.flipY, sampling: m.sampling === "Nearest" ? "nearest" : m.sampling === "Smooth" ? "smooth" : "high" };
 }
 
 /** Serialize a document into a .comp ZIP (manifest.json + images/). */

@@ -5,8 +5,8 @@ import { drawEditor, flattenDocument, screenToDoc } from "../render/compositor";
 import { drawAnts } from "../render/ants";
 import { APP_NAME, APP_VERSION, ISSUES_URL, ORIGINAL_AUTHOR, ORIGINAL_COMPANY, ORIGINAL_REPO_URL, ORIGINAL_SITE_URL, PROJECT_URL, rendererName } from "../app-info";
 const compositorApi = { screenToDoc };
-import { boxCorners, handlePositions } from "../core/transform";
-import { PAINT_TOOLS, cursorForTool } from "./cursors";
+import { boxCorners, handlePositions, rotationHandle } from "../core/transform";
+import { PAINT_TOOLS, cursorForTool, MOVE_CURSOR, DUPLICATE_CURSOR, ROTATE_CURSOR } from "./cursors";
 import { icon, iconEl } from "./icons";
 import { THEME_CHOICES, applyThemeChoice, themeChoice } from "../theme/omarchy";
 import type { IconName } from "./icons";
@@ -447,9 +447,22 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   /** Photoshop's "Show Transform Controls": box + handles around the active layer with the Move tool. */
   function drawTransformControls(ctx: CanvasRenderingContext2D): void {
     const layer = app.activeLayer;
-    if (app.session.tool !== "move" || !layer || !app.isTransformable(layer) || !layer.visible) return;
     const z = app.session.zoom || 1;
     const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7aa2f7";
+    if (app.session.tool === "move" && app.session.snapLines.length && app.doc) {
+      ctx.save();
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1 / z;
+      for (const l of app.session.snapLines) {
+        ctx.beginPath();
+        if (l.axis === "x") { ctx.moveTo(l.pos, 0); ctx.lineTo(l.pos, app.doc.height); }
+        else { ctx.moveTo(0, l.pos); ctx.lineTo(app.doc.width, l.pos); }
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+    const controls = app.session.showTransformControls || !!app.transformEdit?.persistent;
+    if (app.session.tool !== "move" || !layer || !app.isTransformable(layer) || !layer.visible || !controls) return;
     ctx.save();
     ctx.lineWidth = 1 / z;
     ctx.strokeStyle = accent;
@@ -470,14 +483,20 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     corners.forEach((pt, i) => (i ? ctx.lineTo(pt.x, pt.y) : ctx.moveTo(pt.x, pt.y)));
     ctx.closePath();
     ctx.stroke();
-    const s = 8 / z;
+    // Compositor's handles: 7×7 white squares with an accent stroke, and a round rotation knob on a stem.
+    const handles = handlePositions(layer.transform);
+    const top = handles.find((h) => h.id === "n")!;
+    const knob = rotationHandle(layer.transform, z);
+    ctx.beginPath(); ctx.moveTo(top.x, top.y); ctx.lineTo(knob.x, knob.y); ctx.stroke();
+    const s = 7 / z;
     ctx.fillStyle = "#ffffff";
-    for (const h of handlePositions(layer.transform)) {
+    for (const h of handles) {
       ctx.beginPath();
       ctx.rect(h.x - s / 2, h.y - s / 2, s, s);
       ctx.fill();
       ctx.stroke();
     }
+    ctx.beginPath(); ctx.arc(knob.x, knob.y, 4 / z, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
     ctx.restore();
   }
 
@@ -615,7 +634,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "Clear Selection Pixels", shortcut: "⌫", action: () => app.clearActive() },
       { label: "Invert Pixels", shortcut: "⌘I", action: () => app.invertActive() },
       { sep: true, label: "" },
-      { label: "Free Transform", shortcut: "⌘T", action: () => app.setTool("move") },
+      { label: "Transform Layer / Selection", shortcut: "⌘T", action: () => app.transformCommand() },
+      { label: "Show Transform Controls", shortcut: "⌘H", action: () => app.toggleTransformControls() },
       { label: "Reset Transform", action: () => app.resetTransform() },
       { label: "Flip Layer Horizontal", action: () => app.flipActive("h") },
       { label: "Flip Layer Vertical", action: () => app.flipActive("v") },
@@ -639,6 +659,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "New Blank Layer", shortcut: "⇧⌘N", action: () => app.addBlankLayer() },
       { label: "Add Image…", action: () => addImageDialog() },
       { label: "Duplicate Layer", shortcut: "⌘J", action: () => app.duplicateLayer() },
+      { label: "Move Layer Up", shortcut: "⌘]", action: () => app.moveLayerOrder(1) },
+      { label: "Move Layer Down", shortcut: "⌘[", action: () => app.moveLayerOrder(-1) },
       { label: "Group Layers", shortcut: "⌘G", action: () => app.addGroup() },
       { sep: true, label: "" },
       { label: "Trim Transparent Pixels", action: () => app.trimSelected() },
@@ -827,54 +849,66 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     };
 
     if (tool === "move") {
-      const moveHint = document.createElement("div");
-      moveHint.className = "hint";
-      moveHint.textContent = "Ctrl-click picks the layer under the pointer · Alt-drag duplicates · Shift constrains · Space pans";
-      toolHeader.append(moveHint);
       const layer = app.activeLayer;
-      if (layer && app.isTransformable(layer)) {
+      const editing = !!app.transformEdit?.persistent;
+      const can = !!layer && app.isTransformable(layer);
+      const toggle = (label: string, on: boolean, help: string, flip: () => void) => {
+        const b = document.createElement("button");
+        b.className = "toggle" + (on ? " active" : "");
+        b.textContent = label;
+        b.title = help;
+        b.addEventListener("click", flip);
+        return b;
+      };
+      toolHeader.append(
+        toggle("Auto Select", s.transformAutoSelect, "Select layers by clicking the canvas. When off, hold Ctrl to select a layer.", () => app.setAutoSelect(!s.transformAutoSelect)),
+        toggle("Show Controls", s.showTransformControls, "Show the transform box and handles (Ctrl+H). When hidden, drag anywhere to move the layer.", () => app.toggleTransformControls()),
+      );
+      if (layer) {
         const t = layer.transform;
-        const num = (value: number, key: "x" | "y" | "width" | "height" | "rotation", step = 1) => {
-          const input = document.createElement("input");
-          input.type = "number";
-          input.step = String(step);
-          input.value = String(Math.round(value * 10) / 10);
-          input.style.width = "72px";
-          input.addEventListener("input", () => {
-            const v = Number(input.value);
-            if (Number.isFinite(v)) app.setTransform({ [key]: v });
-          });
-          input.addEventListener("change", () => app.commit("Transform"));
-          return input;
-        };
-        const btn = (label: string, title: string, on: () => void) => {
-          const b = document.createElement("button");
-          b.textContent = label;
-          b.title = title;
-          b.addEventListener("click", on);
-          return b;
-        };
-        const iconBtn = (name: IconName, title: string, on: () => void) => {
-          const b = btn("", title, on);
-          b.className = "icon-btn";
-          b.innerHTML = icon(name, 18);
-          return b;
-        };
-        toolHeader.append(
-          field("X", num(t.x, "x")),
-          field("Y", num(t.y, "y")),
-          field("W", num(t.width, "width")),
-          field("H", num(t.height, "height")),
-          field("Angle", num(t.rotation, "rotation", 0.5)),
-          iconBtn("flip-h", "Flip horizontal", () => app.flipActive("h")),
-          iconBtn("flip-v", "Flip vertical", () => app.flipActive("v")),
-          iconBtn("reset", "Reset transform (size, angle, flips)", () => app.resetTransform()),
+        const fmt = (v: number) => (Number.isInteger(v) ? v : Math.round(v * 100) / 100);
+        const tf = (value: number, min: number, max: number, on: (v: number) => void, width = 85, unit?: string) => numberField(fmt(value), min, max, 1, on, { width, unit, digits: 2 });
+        const link = document.createElement("button");
+        link.className = "icon-btn toggle" + (s.locksTransformRatio ? " active" : "");
+        link.innerHTML = icon("link", 16);
+        link.title = "Lock aspect ratio";
+        link.addEventListener("click", () => { s.locksTransformRatio = !s.locksTransformRatio; app.emitView(); });
+        const sampling = document.createElement("select");
+        sampling.innerHTML = `<option value="nearest">Nearest</option><option value="smooth">Smooth</option><option value="high">High quality</option>`;
+        sampling.value = t.sampling ?? "high";
+        sampling.addEventListener("change", () => app.setTransform({ sampling: sampling.value as "nearest" | "smooth" | "high" }));
+        const btn = (label: string, on: () => void, title?: string) => { const b = document.createElement("button"); b.textContent = label; if (title) b.title = title; b.addEventListener("click", on); return b; };
+        const block = document.createElement("div");
+        block.className = "transform-fields";
+        block.append(
+          field("X", tf(t.x, -30000, 30000, (v) => app.setTransform({ x: v }))),
+          field("Y", tf(t.y, -30000, 30000, (v) => app.setTransform({ y: v }))),
+          field("W", tf(t.width, 1, 30000, (v) => app.resizeTransform(v, undefined))),
+          field("H", tf(t.height, 1, 30000, (v) => app.resizeTransform(undefined, v))),
+          link,
+          field("Scale", tf(app.transformScalePercent(layer), 0.1, 30000, (v) => app.setTransformScale(v), 110, "%")),
+          field("°", tf(t.rotation, -360, 360, (v) => app.setTransform({ rotation: v }), 75)),
+          field("Sampling", sampling),
+          btn("Flip H", () => app.flipActive("h")),
+          btn("Flip V", () => app.flipActive("v")),
         );
-        const hint = document.createElement("div");
-        hint.className = "hint";
-        hint.textContent = "Drag handles to scale (Shift: free ratio, Alt: from centre) · drag outside a corner to rotate";
-        toolHeader.append(hint);
+        if (!can && !editing) block.classList.add("disabled");
+        toolHeader.append(block);
       }
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel";
+      cancel.disabled = !app.transformEdit;
+      cancel.addEventListener("click", () => app.cancelTransform());
+      const apply = document.createElement("button");
+      apply.textContent = "Apply";
+      apply.className = "active";
+      apply.disabled = !app.transformEdit;
+      apply.addEventListener("click", () => app.commitTransform());
+      toolHeader.append(cancel, apply);
+      const hint = document.createElement("div");
+      hint.className = "hint";
+      hint.textContent = "Drag to move · Handles to resize · Circle to rotate · 1–0 layer opacity · Space to pan";
+      toolHeader.append(hint);
     } else if (brushTools) {
       const b = s.brush;
       const maskTarget = s.maskSelected && !!app.activeLayer?.mask;
@@ -1598,7 +1632,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "Cut", shortcut: "⌘X", action: () => void app.cutSelection().catch(reportError) },
       { label: "Copy", shortcut: "⌘C", action: () => void app.copyToClipboard(false).catch(reportError) },
       { label: "Copy Merged", shortcut: "⇧⌘C", action: () => void app.copyToClipboard(true).catch(reportError) },
-      { label: "Free Transform", shortcut: "⌘T", action: () => app.setTool("move") },
+      { label: "Transform Selection", shortcut: "⌘T", action: () => app.transformCommand() },
     ];
   }
   const mods = { shift: false, alt: false, dragging: false };
@@ -1615,6 +1649,9 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     const tool = app.session.tool;
     let cursor = cursorForTool({ tool, ...mods, space: app.tempHand });
     if ((tool === "move" || tool === "crop") && e && !mods.dragging) cursor = app.cursorAt(canvas, e) || cursor;
+    if (cursor === "move") cursor = MOVE_CURSOR;
+    else if (cursor === "duplicate") cursor = DUPLICATE_CURSOR;
+    else if (cursor === "rotate") cursor = ROTATE_CURSOR;
     canvas.style.cursor = cursor;
   }
   canvas.addEventListener("pointermove", (e) => {
@@ -1702,7 +1739,13 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     if (mod && e.altKey && key === "l") { e.preventDefault(); app.addBlankLayer(); return; }
     if (mod && key === "w") { e.preventDefault(); void closeDocumentAsk(); return; }
     if (mod && key === "q") { e.preventDefault(); void quitAsk(); return; }
-    if (mod && key === "t") { e.preventDefault(); app.setTool("move"); return; }
+    if (mod && key === "t") { e.preventDefault(); app.transformCommand(); return; }
+    if (mod && key === "h") { e.preventDefault(); app.toggleTransformControls(); return; }
+    if (mod && (e.key === "]" || e.key === "[")) { e.preventDefault(); app.moveLayerOrder(e.key === "]" ? 1 : -1); return; }
+    if (app.transformEdit && !mod && app.session.tool === "move") {
+      if (e.key === "Enter") { e.preventDefault(); app.commitTransform(); return; }
+      if (e.key === "Escape") { app.cancelTransform(); return; }
+    }
     if (mod && key === "o") { e.preventDefault(); openFileDialog(); return; }
     if (mod && key === "c") { e.preventDefault(); void app.copyToClipboard(e.shiftKey).catch(console.error); return; }
     // Ctrl+V is handled by the paste event below (it carries the clipboard image).

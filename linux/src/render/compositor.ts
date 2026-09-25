@@ -89,6 +89,8 @@ function drawTransformed(ctx: CanvasRenderingContext2D, layer: Layer, img: Layer
   ctx.translate(t.x + t.width / 2, t.y + t.height / 2);
   ctx.rotate((t.rotation * Math.PI) / 180);
   ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
+  if (t.sampling === "nearest") ctx.imageSmoothingEnabled = false;
+  else { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = t.sampling === "smooth" ? "low" : "high"; }
   ctx.drawImage(
     img.canvas,
     -t.width / 2 - img.pad * sx,

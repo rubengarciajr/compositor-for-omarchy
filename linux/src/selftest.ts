@@ -437,11 +437,11 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.setTool("move");
     click(50, 20, { ctrl: true });
     const pickedBg = app.activeLayer!.id;
-    click(10, 20, { ctrl: true });
+    click(15, 20, { ctrl: true }); // (10, 20) would sit on the background's left edge handle
     const pickedTop = app.activeLayer!.id;
     check("ctrl-click with move picks the layer under the pointer", pickedBg === bgId && pickedTop === topId, { pickedBg: pickedBg === bgId, pickedTop: pickedTop === topId });
     const n = app.doc!.layers.length;
-    app.pointerDown(view, ev(10, 20, { alt: true })); app.pointerMove(view, ev(30, 20, { alt: true })); app.pointerUp(view, ev(30, 20, { alt: true }));
+    app.pointerDown(view, ev(15, 20, { alt: true })); app.pointerMove(view, ev(35, 20, { alt: true })); app.pointerUp(view, ev(35, 20, { alt: true }));
     check("alt-drag with move duplicates the layer", app.doc!.layers.length === n + 1 && app.activeLayer!.id !== topId && Math.round(app.activeLayer!.transform.x) === 20, { n, now: app.doc!.layers.length, x: app.activeLayer!.transform.x });
   }
   // Compositor 1.2.5–1.2.11 features: layer clipboard, stacked duplicates, crop ratios and
@@ -603,7 +603,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const drawn = { ...app.session.cropRect! };
     app.pointerDown(view, ev(25, 20)); app.pointerMove(view, ev(35, 28)); app.pointerUp(view, ev(35, 28)); // se handle
     const resized = { ...app.session.cropRect! };
-    app.pointerDown(view, ev(15, 12)); app.pointerMove(view, ev(17, 13)); app.pointerUp(view, ev(17, 13)); // inside
+    app.pointerDown(view, ev(15, 14)); app.pointerMove(view, ev(17, 15)); app.pointerUp(view, ev(17, 15)); // inside
     const moved = { ...app.session.cropRect! };
     check("crop handles resize the box and dragging inside moves it", Math.round(drawn.w) === 20 && Math.round(resized.w) === 30 && Math.round(resized.h) === 23 && Math.round(moved.x) === 7 && Math.round(moved.y) === 6 && Math.round(moved.w) === 30, { drawn, resized, moved });
     app.session.cropRect = null;
@@ -745,7 +745,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     // Hit testing at zoom 1: handle, inside, rotate band, outside.
     check("hit handle", hitTest(t, { x: 301, y: 201 }, 1).kind === "handle", hitTest(t, { x: 301, y: 201 }, 1));
     check("hit inside", hitTest(t, { x: 200, y: 150 }, 1).kind === "inside", hitTest(t, { x: 200, y: 150 }, 1));
-    check("hit rotate band", hitTest(t, { x: 312, y: 212 }, 1).kind === "rotate", hitTest(t, { x: 312, y: 212 }, 1));
+    check("hit rotation knob", hitTest(t, { x: 200, y: 72 }, 1).kind === "rotate" && hitTest(t, { x: 312, y: 212 }, 1).kind === "outside" && hitTest(t, { x: 200, y: 105 }, 1).kind === "handle", hitTest(t, { x: 200, y: 72 }, 1));
     check("hit outside", hitTest(t, { x: 600, y: 600 }, 1).kind === "outside", hitTest(t, { x: 600, y: 600 }, 1));
   }
   // Grouping: folder appears where the top-most selected layer was, contents nest, ungroup restores.
@@ -988,6 +988,91 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     check("Delete removes the last lasso corner", app.session.lassoPath?.length === 2, app.session.lassoPath);
     app.cancelLasso();
     app.session.lassoMode = "free";
+  }
+  // Move / Transform follows Compositor 1.3: persistent ⌘T edits, floating selections, snapping,
+  // flips past the opposite side, Show Controls, layer order keys.
+  {
+    app.newDocument(200, 160, "transform");
+    const view = document.getElementById("editor") as HTMLCanvasElement;
+    const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
+      const rect = view.getBoundingClientRect();
+      const z = app.session.zoom;
+      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
+      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
+    };
+    const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
+      app.pointerDown(view, ev(x0, y0, m)); app.pointerMove(view, ev((x0 + x1) / 2, (y0 + y1) / 2, m)); app.pointerMove(view, ev(x1, y1, m)); app.pointerUp(view, ev(x1, y1, m));
+    };
+    app.addBlankLayer();
+    const layer = app.activeLayer!;
+    layer.canvas = createCanvas(80, 60);
+    layer.canvas.getContext("2d")!.fillStyle = "#000"; layer.canvas.getContext("2d")!.fillRect(0, 0, 80, 60);
+    layer.transform = { x: 40, y: 30, width: 80, height: 60, rotation: 0, flipH: false, flipV: false };
+    app.commit("Box");
+    app.setTool("move");
+    const hist = (app as unknown as { history: History }).history;
+    // Typed values start a persistent edit; Apply commits once, Esc restores without a step.
+    const steps = hist.entries().stack.length;
+    app.setTransform({ x: 50 });
+    check("typing a value starts a persistent transform edit", app.transformEdit?.persistent === true && layer.transform.x === 50 && hist.entries().stack.length === steps, { edit: app.transformEdit?.persistent, x: layer.transform.x });
+    app.cancelTransform();
+    check("Esc restores the transform without an undo step", layer.transform.x === 40 && hist.entries().stack.length === steps && !app.transformEdit, { x: layer.transform.x, steps: hist.entries().stack.length });
+    app.setTransform({ x: 55 });
+    app.commitTransform();
+    check("Apply commits the transform as one step", app.activeLayer!.transform.x === 55 && hist.entries().stack.length === steps + 1, { x: app.activeLayer!.transform.x, steps: hist.entries().stack.length });
+    // A plain drag commits on release; Alt-drag moves a copy; with a fresh Shift it locks to an axis.
+    const before = app.doc!.layers.length;
+    drag(80, 60, 90, 70, { alt: true, ctrl: true }); // Control: no snapping to the canvas centre
+    check("Option-drag duplicates the layer as the drag begins", app.doc!.layers.length === before + 1 && app.activeLayer!.id !== layer.id && app.activeLayer!.transform.x === 65 && app.activeLayer!.transform.y === 40, { layers: app.doc!.layers.length, t: app.activeLayer!.transform });
+    app.undo(); app.undo();
+    // Snapping: a move within 10 screen px of the canvas edge lands on it (Control bypasses it).
+    app.selectLayer(layer.id);
+    drag(80, 60, 83, 60, { ctrl: true });
+    const free = app.activeLayer!.transform.x;
+    check("a Control-drag lands exactly where dragged", free === 58, { free });
+    app.activeLayer!.transform.x = 115; // right edge at 195, 5 px from the canvas edge
+    app.commit("Near edge");
+    drag(150, 60, 153, 60);
+    const snapped = app.activeLayer!.transform.x;
+    app.activeLayer!.transform.x = 115;
+    app.commit("Near edge");
+    drag(150, 60, 153, 60, { ctrl: true });
+    check("moves snap to the canvas edge unless Control is held", snapped === 120 && app.activeLayer!.transform.x === 118, { snapped, ctrl: app.activeLayer!.transform.x });
+    // Dragging a handle past the opposite side flips the layer.
+    const t0 = { x: 40, y: 30, width: 80, height: 60, rotation: 0, flipH: false, flipV: false };
+    const flipped = scaleByHandle(t0, { id: "e", hx: 1, hy: 0 }, { x: 20, y: 60 }, { proportional: false, fromCenter: false });
+    check("dragging past the opposite side flips the layer", flipped.flipH === true && Math.round(flipped.width) === 20 && Math.round(flipped.x) === 20, flipped);
+    // Show Controls off: no handles, any drag moves the layer.
+    app.activeLayer!.transform = { ...t0 };
+    app.commit("Reset");
+    app.session.showTransformControls = false;
+    drag(120, 60, 130, 70); // where the east handle would be
+    check("hidden controls make every drag a move", app.activeLayer!.transform.x === 50 && app.activeLayer!.transform.width === 80, app.activeLayer!.transform);
+    app.session.showTransformControls = true;
+    // ⌘] / ⌘[ reorder layers.
+    const order = () => app.doc!.layers.map((l) => l.name);
+    app.moveLayerOrder(-1);
+    const down = order();
+    app.moveLayerOrder(1);
+    check("Move Layer Down / Up reorder among siblings", down[0] === app.activeLayer!.name && order()[1] === app.activeLayer!.name, { down, up: order() });
+    // Floating selection transform: ⌘T with a selection lifts the pixels, Apply merges them back.
+    app.activeLayer!.transform = { ...t0 };
+    app.commit("Reset");
+    app.setTool("marquee");
+    drag(40, 30, 80, 90); // the left half of the box
+    app.transformCommand();
+    const floating = app.activeLayer!;
+    check("⌘T with a selection floats the selected pixels", floating.name === "Floating Selection" && app.transformEdit?.floating?.sourceId === layer.id && app.session.tool === "move", { name: floating.name });
+    app.setTransform({ x: 130, y: 100 });
+    app.commitTransform();
+    const merged = app.activeLayer!;
+    const moved = px(flattenDocument(app.doc!), 150, 130), hole = px(flattenDocument(app.doc!), 60, 60);
+    check("Apply merges the floating selection back and moves the outline", merged.id === layer.id && moved[0] === 0 && moved[3] === 255 && hole[3] === 255 && hole[0] === 255 && !app.doc!.layers.some((l) => l.name === "Floating Selection"), { moved, hole, layers: order() });
+    app.transformCommand();
+    app.cancelTransform();
+    check("Esc cancels a floating transform exactly", !app.doc!.layers.some((l) => l.name === "Floating Selection") && px(flattenDocument(app.doc!), 150, 130)[0] === 0, order());
+    app.deselect();
   }
   // Cursors and brush keys.
   {
