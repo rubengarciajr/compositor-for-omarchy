@@ -737,3 +737,4 @@ input[type="number"], input[type="text"], select {
 .layer-row .thumb.mask canvas { background: #000; }
 .layer-row .thumb.mask.off { opacity: 0.45; }
 .layer-row .thumb.target { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tool-header .divider { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }

@@ -29,11 +29,11 @@ function cropTransform(r: { x: number; y: number; w: number; h: number }): Trans
   return { x: r.x, y: r.y, width: r.w, height: r.h, rotation: 0, flipH: false, flipV: false };
 }
 
-/** Photoshop's selection modifiers: Shift adds to the selection, Alt subtracts from it. */
-function selectionMode(e: { shiftKey?: boolean; altKey?: boolean }): Selection["mode"] {
-  if (e.shiftKey) return "add";
+/** Photoshop's selection modifiers: Option subtracts, Shift adds, otherwise the header's Mode. */
+function selectionMode(e: { shiftKey?: boolean; altKey?: boolean }, choice: Selection["mode"] = "replace"): Selection["mode"] {
   if (e.altKey) return "subtract";
-  return "replace";
+  if (e.shiftKey) return "add";
+  return choice;
 }
 import { cursorFor, fromLocal, hitTest, rotateByPointer, scaleByHandle } from "./transform";
 import { PROJECT_EXTENSION, PROJECT_MIME, buildProject, isProjectFile, parseProject, parseProjectFrom, serializeProject } from "../io/project";
@@ -51,11 +51,14 @@ import {
   invertImage,
   imageDataOf,
   colorSelect,
+  thresholdMask,
+  translateMask,
   maskBounds,
   canvasFromImageData,
   parseHex,
 } from "./pixels";
-import { BrushStroke, WarpStroke, layerInDocument } from "./stroke";
+import { BrushStroke, WarpStroke, layerInDocument, resizeLayerBitmap, docToLayer } from "./stroke";
+import { selectionOutline } from "../render/ants";
 import type { StrokeMode, StrokeOptions, StrokeTip } from "./stroke";
 import { spotHeal } from "./heal";
 import { flattenDocument, flattenDocumentCopy, fitZoom, screenToDoc, ensureLayerBitmap, setEditingLayer, beginStroke, endStroke } from "../render/compositor";
@@ -102,8 +105,15 @@ export class App {
   /** Message from the last failed paint action (e.g. no clone source), for the shell to show. */
   brushError: string | null = null;
   private marqueeStart: { x: number; y: number } | null = null;
+  /** Marquee: Shift already held at the press chose Add; only a fresh Shift squares the box. */
+  private marqueeConstrainArmed = true;
+  private marqueeDragPixel: { x: number; y: number } | null = null;
+  /** Dragging the selection outline (New mode, inside the selection). */
+  private selectionMove: { origin: HTMLCanvasElement; outline: HTMLCanvasElement | null; start: { x: number; y: number }; moved: boolean } | null = null;
+  /** Dragging the selected pixels (⌘-drag inside the selection) on a temporary floating layer. */
+  private pixelMove: { sourceId: string; floatingId: string; sourceBefore: HTMLCanvasElement; originMask: HTMLCanvasElement; originOutline: HTMLCanvasElement | null; base: { x: number; y: number }; start: { x: number; y: number }; offset: { x: number; y: number }; duplicate: boolean } | null = null;
   private lassoPoints: [number, number][] = [];
-  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "tip" | "scale" | "rotate" = "none";
+  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "tip" | "scale" | "rotate" | "select-move" | "pixel-move" = "none";
   private moveStart: { x: number; y: number } | null = null;
   private transformStart: Transform | null = null;
   private transformHandle: HandleSpec | null = null;
@@ -129,6 +139,14 @@ export class App {
       marqueeShape: "rect",
       lassoMode: "free",
       wandContiguous: true,
+      selectionModeChoice: "replace",
+      heldSelectionMode: null,
+      selectionAntialiased: true,
+      selectionExpandAmount: 1,
+      selectionContractAmount: 1,
+      selectionFeatherAmount: 2,
+      wandSampleSize: 0,
+      wandSampleAll: false,
       wandTolerance: 32,
       shapeKind: "rect",
       activeLayerId: null,
@@ -918,6 +936,7 @@ export class App {
         Object.assign(b, parked);
       }
     }
+    if (before !== tool) this.cancelLasso(); // switching tools drops an outline in progress
     this.session.tool = tool;
     if (tool === "crop" && this.doc?.selection?.mask && !this.session.cropRect) {
       // With a selection, the crop box starts at its bounds (Compositor 1.2.5).
@@ -1038,6 +1057,7 @@ export class App {
     const doc = this.doc;
     const layer = this.activeLayer;
     if (!doc || !layer || !layer.canvas) return;
+    if (this.session.maskSelected && layer.mask) { this.fillActive(this.session.background); return; } // a mask clears to the background colour
     if (doc.selection?.mask) this.eraseSelection(layer);
     else {
       const c = writableLayer(layer)!;
@@ -1063,6 +1083,27 @@ export class App {
     return !!this.doc?.selection?.mask;
   }
 
+  /**
+   * Shift / Option went down or up: remember the held mode for the header, and reshape a
+   * marquee in progress the moment Shift changes, without waiting for mouse motion.
+   */
+  modifiersChanged(view: HTMLCanvasElement, e: { shiftKey: boolean; altKey: boolean }): void {
+    this.session.heldSelectionMode = e.altKey ? "subtract" : e.shiftKey ? "add" : null;
+    if (this.dragMode === "marquee" && this.session.tool === "marquee" && this.marqueeDragPixel && this.doc) {
+      const p = this.marqueeDragPixel;
+      const z = this.session.zoom || 1;
+      const rect = view.getBoundingClientRect();
+      const ox = rect.left + rect.width / 2 + this.session.panX - (this.doc.width * z) / 2;
+      const oy = rect.top + rect.height / 2 + this.session.panY - (this.doc.height * z) / 2;
+      this.pointerMove(view, { clientX: ox + p.x * z, clientY: oy + p.y * z, shiftKey: e.shiftKey, altKey: e.altKey } as PointerEvent);
+    }
+  }
+
+  /** What the header's Mode picker highlights: a held modifier, else the chosen mode. */
+  displayedSelectionMode(): Selection["mode"] {
+    return this.session.heldSelectionMode ?? this.session.selectionModeChoice;
+  }
+
   selectAll(): void {
     const doc = this.doc;
     if (!doc) return;
@@ -1070,8 +1111,8 @@ export class App {
     const ctx = mask.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, doc.width, doc.height);
-    doc.selection = { path: { type: "rect", x: 0, y: 0, w: doc.width, h: doc.height }, mask, mode: "replace" };
-    this.commit("Select all");
+    doc.selection = { path: { type: "rect", x: 0, y: 0, w: doc.width, h: doc.height }, mask, mode: "replace", feather: 0, outline: null };
+    this.commit("Select All");
   }
 
   deselect(): void {
@@ -1083,15 +1124,16 @@ export class App {
 
   invertSelection(): void {
     const doc = this.doc;
-    if (!doc?.selection?.mask) return;
+    const outline = this.selectionOutlineMask();
+    if (!doc || !outline) return;
     const mask = createCanvas(doc.width, doc.height);
     const ctx = mask.getContext("2d")!;
     ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, doc.width, doc.height);
     ctx.globalCompositeOperation = "destination-out";
-    ctx.drawImage(doc.selection.mask, 0, 0);
-    doc.selection = { path: { type: "rect", x: 0, y: 0, w: doc.width, h: doc.height }, mask, mode: "replace" };
-    this.commit("Select inverse");
+    ctx.drawImage(outline, 0, 0);
+    doc.selection = this.featheredSelection(mask, doc.selection?.feather ?? 0); // keeps the feather
+    this.commit("Inverse");
   }
 
   /**
@@ -1409,21 +1451,28 @@ export class App {
       return;
     }
     if (tool === "marquee" || tool === "lasso" || tool === "wand") {
-      if (tool === "wand") {
-        const src = flattenDocument(doc);
-        const sx = Math.min(doc.width - 1, Math.max(0, Math.round(p.x))), sy = Math.min(doc.height - 1, Math.max(0, Math.round(p.y)));
-        const mask = this.session.wandContiguous
-          ? floodSelect(imageDataOf(src), sx, sy, this.session.wandTolerance)
-          : colorSelect(imageDataOf(src), sx, sy, this.session.wandTolerance);
-        this.setSelection({ type: "path", points: [[p.x, p.y]] }, mask, selectionMode(e));
-        this.commit("Magic wand");
-        return;
+      const polygonDraft = tool === "lasso" && this.session.lassoMode === "polygon" && this.lassoPoints.length > 0;
+      if (!polygonDraft) {
+        const inside = this.pointInSelection(p);
+        if ((e.ctrlKey || e.metaKey) && inside) {
+          // ⌘-drag inside the selection moves its pixels; ⌘⌥ copies them.
+          if (this.beginPixelMove(e.altKey, p)) this.dragMode = "pixel-move";
+          return;
+        }
+        const mode = selectionMode(e, this.session.selectionModeChoice);
+        if (mode === "replace" && inside && tool !== "wand") {
+          const outline = this.selectionOutlineMask()!;
+          this.selectionMove = { origin: outline, outline: this.doc?.selection?.outline ?? null, start: p, moved: false };
+          this.dragMode = "select-move";
+          return;
+        }
       }
+      if (tool === "wand") { this.magicWand(p, selectionMode(e, this.session.selectionModeChoice)); return; }
       if (tool === "lasso" && this.session.lassoMode === "polygon") {
-        // Click adds a corner; clicking the first corner (or double-click / Enter) closes.
+        // Click adds a corner; the first corner (within 8 screen px), a double-click or Enter closes.
         const first = this.lassoPoints[0];
-        if (first && this.lassoPoints.length >= 3 && Math.hypot(p.x - first[0], p.y - first[1]) * this.session.zoom < 10) {
-          this.finishLasso(selectionMode(e));
+        if (first && this.lassoPoints.length >= 3 && Math.hypot(p.x - first[0], p.y - first[1]) * this.session.zoom <= 8) {
+          this.finishLasso(selectionMode(e, this.session.selectionModeChoice));
           return;
         }
         this.lassoPoints.push([p.x, p.y]);
@@ -1432,8 +1481,10 @@ export class App {
         return;
       }
       this.dragMode = "marquee";
-      this.marqueeStart = p;
-      this.downMode = selectionMode(e); // Shift/Alt at the click choose add/subtract; during the drag they constrain
+      this.marqueeStart = tool === "marquee" ? { x: Math.round(p.x), y: Math.round(p.y) } : p; // marquees snap to whole pixels
+      this.marqueeConstrainArmed = !e.shiftKey; // Shift at the press means Add; a fresh Shift squares
+      this.marqueeDragPixel = null;
+      this.downMode = selectionMode(e, this.session.selectionModeChoice);
       if (tool === "lasso") {
         this.lassoPoints = [[p.x, p.y]];
         this.session.lassoPath = this.lassoPoints;
@@ -1521,7 +1572,7 @@ export class App {
   pointerMove(view: HTMLCanvasElement, e: PointerEvent): void {
     const doc = this.doc;
     if (!doc) return;
-    const p = screenToDoc(view, doc, this.session, e.clientX, e.clientY);
+    let p = screenToDoc(view, doc, this.session, e.clientX, e.clientY);
     if (this.dragMode === "pan" && this.moveStart) {
       this.session.panX = e.clientX - this.moveStart.x;
       this.session.panY = e.clientY - this.moveStart.y;
@@ -1604,12 +1655,27 @@ export class App {
       this.redraw();
       return;
     }
+    if (this.dragMode === "select-move" && this.selectionMove) {
+      const sm = this.selectionMove;
+      const dx = Math.round(p.x - sm.start.x), dy = Math.round(p.y - sm.start.y);
+      if (dx || dy) sm.moved = true;
+      doc.selection = this.translatedSelection(sm.origin, dx, dy, doc.selection?.feather ?? 0);
+      this.overlay();
+      return;
+    }
+    if (this.dragMode === "pixel-move" && this.pixelMove) {
+      this.movePixels({ x: p.x - this.pixelMove.start.x, y: p.y - this.pixelMove.start.y });
+      return;
+    }
     if (this.dragMode === "marquee" && this.marqueeStart) {
       const s0 = this.marqueeStart;
+      const marquee = this.session.tool === "marquee";
+      if (marquee && !e.shiftKey) this.marqueeConstrainArmed = true;
+      if (marquee) { p = { x: Math.round(p.x), y: Math.round(p.y) }; this.marqueeDragPixel = p; }
       let dx = p.x - s0.x, dy = p.y - s0.y;
-      const constrain = e.shiftKey && (this.session.tool === "marquee" || this.session.tool === "shape");
+      const constrain = e.shiftKey && (marquee ? this.marqueeConstrainArmed : this.session.tool === "shape");
       if (constrain) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx || 1) * m; dy = Math.sign(dy || 1) * m; } // square / circle
-      const fromCenter = e.altKey && (this.session.tool === "marquee" || this.session.tool === "shape");
+      const fromCenter = e.altKey && this.session.tool === "shape"; // the Marquee keeps Option for Subtract
       const x = fromCenter ? s0.x - Math.abs(dx) : Math.min(s0.x, s0.x + dx);
       const y = fromCenter ? s0.y - Math.abs(dy) : Math.min(s0.y, s0.y + dy);
       const w = fromCenter ? Math.abs(dx) * 2 : Math.abs(dx);
@@ -1617,7 +1683,7 @@ export class App {
       if (this.session.tool === "lasso") {
         // Freehand: every move adds a point to the outline (no bounding rectangle).
         const last = this.lassoPoints[this.lassoPoints.length - 1];
-        if (!last || Math.hypot(p.x - last[0], p.y - last[1]) * this.session.zoom >= 1.5) this.lassoPoints.push([p.x, p.y]);
+        if (!last || Math.hypot(p.x - last[0], p.y - last[1]) >= 0.25) this.lassoPoints.push([p.x, p.y]);
         this.session.lassoPath = this.lassoPoints;
         this.overlay();
         return;
@@ -1656,20 +1722,222 @@ export class App {
    * Store a new selection, combining it with the current one like Photoshop:
    * Shift adds, Alt subtracts, otherwise it replaces.
    */
+  /**
+   * Combine a new outline with the selection: New replaces, Add unions, Subtract cuts (a
+   * subtract with nothing to subtract from is ignored). Every new outline resets the feather.
+   */
   private setSelection(path: SelectionPath, mask: HTMLCanvasElement, mode: Selection["mode"]): void {
     const doc = this.doc;
     if (!doc) return;
-    const current = doc.selection?.mask;
+    if (!this.session.selectionAntialiased && !(path.type === "rect" && !path.ellipse)) thresholdMask(mask);
+    const current = doc.selection?.outline ?? doc.selection?.mask;
     if (mode === "replace" || !current) {
       if (mode === "subtract" && !current) return; // nothing to subtract from
-      doc.selection = { path, mask, mode: "replace" };
+      doc.selection = { path, mask, mode: "replace", feather: 0, outline: null };
       return;
     }
     const combined = cloneCanvas(current);
     const ctx = combined.getContext("2d")!;
     ctx.globalCompositeOperation = mode === "subtract" ? "destination-out" : "source-over";
     ctx.drawImage(mask, 0, 0);
-    doc.selection = { path, mask: combined, mode };
+    doc.selection = { path, mask: combined, mode, feather: 0, outline: null };
+  }
+
+  /** The selection's crisp outline (the coverage itself unless feathered). */
+  private selectionOutlineMask(): HTMLCanvasElement | null {
+    const sel = this.doc?.selection;
+    return sel ? sel.outline ?? sel.mask : null;
+  }
+
+  /** A selection that exists but covers nothing ("Empty selection"): edits touch nothing. */
+  isSelectionEmpty(): boolean {
+    const m = this.selectionOutlineMask();
+    return !!m && !maskBounds(m);
+  }
+
+  /** Whether a document point lies inside the selection (for moving it). */
+  pointInSelection(p: { x: number; y: number }): boolean {
+    const doc = this.doc;
+    const m = this.selectionOutlineMask();
+    if (!doc || !m) return false;
+    const x = Math.floor(p.x), y = Math.floor(p.y);
+    if (x < 0 || y < 0 || x >= doc.width || y >= doc.height) return false;
+    return m.getContext("2d")!.getImageData(x, y, 1, 1).data[3] > 127;
+  }
+
+  /** Re-apply the feather to a crisp outline (or drop it for feather 0). */
+  private featheredSelection(outline: HTMLCanvasElement, feather: number): Selection {
+    const path: SelectionPath = this.doc?.selection?.path ?? { type: "rect", x: 0, y: 0, w: 0, h: 0 };
+    if (feather <= 0) return { path, mask: outline, mode: "replace", feather: 0, outline: null };
+    return { path, mask: gaussianBlur(outline, feather / 2), mode: "replace", feather, outline };
+  }
+
+  /** Move the outline by whole pixels; what leaves the canvas comes back intact when moved back. */
+  private translatedSelection(originOutline: HTMLCanvasElement, dx: number, dy: number, feather: number): Selection {
+    return this.featheredSelection(translateMask(originOutline, dx, dy), feather);
+  }
+
+  /** Arrow keys with a selection tool: nudge the outline 1 px (Shift 10), one undo step per press. */
+  nudgeSelection(dx: number, dy: number): void {
+    const doc = this.doc;
+    const outline = this.selectionOutlineMask();
+    if (!doc || !outline || this.session.lassoPath) return;
+    doc.selection = this.translatedSelection(outline, dx, dy, doc.selection?.feather ?? 0);
+    this.commit("Move Selection");
+  }
+
+  /** ⌘-arrows: move the selected pixels 1 px (Shift 10). */
+  nudgePixels(dx: number, dy: number): void {
+    if (!this.beginPixelMove(false, { x: 0, y: 0 })) return;
+    this.movePixels({ x: dx, y: dy });
+    this.finishPixelMove();
+  }
+
+  /** Lift the selected pixels onto a temporary layer so they can be dragged (⌘-drag; ⌘⌥ duplicates). */
+  private beginPixelMove(duplicate: boolean, start: { x: number; y: number }): boolean {
+    const doc = this.doc;
+    const source = this.activeLayer;
+    if (!doc || !source?.canvas || source.kind === "group" || source.kind === "adjustment" || this.session.maskSelected || this.pixelMove) return false;
+    if (!doc.selection?.mask || this.isSelectionEmpty()) return false;
+    const lifted = this.cutout(false);
+    if (!lifted) return false;
+    const sourceBefore = source.canvas;
+    if (!duplicate) this.eraseSelection(source); // punches the hole through the (feathered) coverage
+    const floating = createLayer({ name: "Floating Selection", kind: "raster", canvas: lifted.canvas, transform: defaultTransform(lifted.bounds.w, lifted.bounds.h, lifted.bounds.x, lifted.bounds.y) });
+    floating.opacity = source.opacity;
+    floating.blendMode = source.blendMode;
+    this.insertLayerAboveActive(floating);
+    this.pixelMove = { sourceId: source.id, floatingId: floating.id, sourceBefore, originMask: doc.selection.outline ?? doc.selection.mask, originOutline: doc.selection.outline ?? null, base: { x: lifted.bounds.x, y: lifted.bounds.y }, start, offset: { x: 0, y: 0 }, duplicate };
+    return true;
+  }
+
+  private movePixels(offset: { x: number; y: number }): void {
+    const doc = this.doc;
+    const pm = this.pixelMove;
+    if (!doc || !pm) return;
+    pm.offset = { x: Math.round(offset.x), y: Math.round(offset.y) };
+    const floating = doc.layers.find((l) => l.id === pm.floatingId);
+    if (!floating) return;
+    floating.transform.x = pm.base.x + pm.offset.x;
+    floating.transform.y = pm.base.y + pm.offset.y;
+    doc.selection = this.translatedSelection(pm.originMask, pm.offset.x, pm.offset.y, doc.selection?.feather ?? 0);
+    this.redraw();
+  }
+
+  /** Merge the lifted pixels back into their layer (growing it where they now extend past it). */
+  private finishPixelMove(): void {
+    const doc = this.doc;
+    const pm = this.pixelMove;
+    this.pixelMove = null;
+    if (!doc || !pm) return;
+    const source = doc.layers.find((l) => l.id === pm.sourceId);
+    const floating = doc.layers.find((l) => l.id === pm.floatingId);
+    doc.layers = doc.layers.filter((l) => l.id !== pm.floatingId);
+    this.session.activeLayerId = pm.sourceId;
+    this.session.selectedLayerIds = [pm.sourceId];
+    if (!source || !floating?.canvas) { this.emit(); return; }
+    if (pm.offset.x === 0 && pm.offset.y === 0 && !pm.duplicate) {
+      source.canvas = pm.sourceBefore; // nothing moved: exactly as before, no undo step
+      doc.selection = this.translatedSelection(pm.originMask, 0, 0, doc.selection?.feather ?? 0);
+      this.emit();
+      return;
+    }
+    const c = source.canvas!;
+    const t = floating.transform;
+    const corners = [{ x: t.x, y: t.y }, { x: t.x + t.width, y: t.y }, { x: t.x, y: t.y + t.height }, { x: t.x + t.width, y: t.y + t.height }]
+      .map((q) => docToLayer(source.transform, c.width, c.height, q));
+    const lx0 = Math.floor(Math.min(...corners.map((q) => q.x))), ly0 = Math.floor(Math.min(...corners.map((q) => q.y)));
+    const lx1 = Math.ceil(Math.max(...corners.map((q) => q.x))), ly1 = Math.ceil(Math.max(...corners.map((q) => q.y)));
+    writableLayer(source);
+    resizeLayerBitmap(source, Math.max(0, -lx0), Math.max(0, -ly0), Math.max(0, lx1 - c.width), Math.max(0, ly1 - c.height));
+    const ctx = source.canvas!.getContext("2d")!;
+    enterDocSpace(ctx, source);
+    ctx.drawImage(floating.canvas, t.x, t.y, t.width, t.height);
+    ctx.restore();
+    this.commit(pm.duplicate ? "Duplicate Pixels" : "Move Pixels");
+  }
+
+  /** Select › Expand… / Contract…: stroke the outline with a round band and add or cut it. */
+  resizeSelection(delta: number): void {
+    const doc = this.doc;
+    const outline = this.selectionOutlineMask();
+    if (!doc || !outline || delta === 0 || Math.abs(delta) > 500 || !maskBounds(outline)) return;
+    const seg = selectionOutline(outline);
+    const next = cloneCanvas(outline);
+    const ctx = next.getContext("2d")!;
+    ctx.beginPath();
+    for (let i = 0; i < seg.length; i += 4) { ctx.moveTo(seg[i], seg[i + 1]); ctx.lineTo(seg[i + 2], seg[i + 3]); }
+    ctx.lineWidth = Math.abs(delta) * 2;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#fff";
+    ctx.globalCompositeOperation = delta > 0 ? "source-over" : "destination-out";
+    ctx.stroke();
+    if (!this.session.selectionAntialiased) thresholdMask(next);
+    doc.selection = this.featheredSelection(next, doc.selection?.feather ?? 0);
+    this.commit(delta > 0 ? "Expand Selection" : "Contract Selection");
+  }
+
+  /** Select › Feather…: soften the edge; repeated feathers stack in quadrature, up to 250 px. */
+  featherSelection(amount: number): void {
+    const doc = this.doc;
+    const outline = this.selectionOutlineMask();
+    if (!doc || !outline || amount <= 0 || !maskBounds(outline)) return;
+    const current = doc.selection?.feather ?? 0;
+    const feather = Math.min(250, Math.sqrt(current * current + amount * amount));
+    doc.selection = this.featheredSelection(outline, feather);
+    this.commit("Feather Selection");
+  }
+
+  /** Select › Layer's Pixels: the active layer's at-least-half-opaque pixels, as placed on the canvas. */
+  selectLayerPixels(): void {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    if (!doc || !layer?.canvas || layer.kind === "group") return;
+    const mask = thresholdMask(layerInDocument(doc, layer));
+    if (!maskBounds(mask)) return;
+    this.setSelection({ type: "rect", x: 0, y: 0, w: doc.width, h: doc.height }, mask, this.session.selectionModeChoice);
+    this.commit("Load Layer Selection");
+  }
+
+  /** Select › Mask's Black Areas: the hidden part of the active layer's mask. */
+  selectMaskBlack(): void {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    if (!doc || !layer?.mask) return;
+    const mask = createCanvas(doc.width, doc.height);
+    const ctx = mask.getContext("2d")!;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, doc.width, doc.height);
+    ctx.globalCompositeOperation = "destination-out";
+    ctx.drawImage(layer.mask.canvas, 0, 0);
+    thresholdMask(mask);
+    if (!maskBounds(mask)) return;
+    this.setSelection({ type: "rect", x: 0, y: 0, w: doc.width, h: doc.height }, mask, this.session.selectionModeChoice);
+    this.commit("Load Mask Selection");
+  }
+
+  /** ⌘X: copy the selected pixels, then clear them. */
+  async cutSelection(): Promise<void> {
+    if (!this.doc?.selection?.mask) return;
+    if (await this.copyToClipboard(false)) this.clearActive();
+  }
+
+  /** Delete: a selection clears its pixels; otherwise the layer (or its mask) goes. */
+  deleteKeyPressed(): void {
+    if (this.session.lassoPath) { this.removeLastLassoPoint(); return; }
+    if (this.doc?.selection) { this.clearActive(); return; }
+    const layer = this.activeLayer;
+    if (this.session.maskSelected && layer?.mask) { layer.mask = null; this.session.maskSelected = false; this.commit("Delete Mask"); return; }
+    this.deleteSelection();
+  }
+
+  /** Delete while drawing a polygon: drop the last corner (an empty draft ends). */
+  removeLastLassoPoint(): void {
+    this.lassoPoints.pop();
+    if (!this.lassoPoints.length) { this.cancelLasso(); return; }
+    this.session.lassoPath = this.lassoPoints;
+    this.overlay();
   }
 
   pointerUp(_view: HTMLCanvasElement, e: PointerEvent): void {
@@ -1694,9 +1962,21 @@ export class App {
       this.transformHandle = null;
       if (this.dragMode === "scale") this.bakeTextScale();
       this.commit(this.dragMode === "scale" ? "Scale layer" : "Rotate layer");
+    } else if (this.dragMode === "select-move" && this.selectionMove) {
+      const sm = this.selectionMove;
+      this.selectionMove = null;
+      if (sm.moved) this.commit("Move Selection");
+      else if (this.session.tool === "wand") this.magicWand(sm.start, "replace"); // a click inside re-selects from that pixel
+      else this.deselect(); // a click inside without a drag deselects
+    } else if (this.dragMode === "pixel-move") {
+      this.finishPixelMove();
     } else if (this.dragMode === "marquee" && this.marqueeStart) {
       const r = this.session.cropRect;
-      if (this.session.tool === "marquee" && r && r.w > 1 && r.h > 1) {
+      if (this.session.tool === "marquee" && (!r || r.w < 1 || r.h < 1)) {
+        // A click that encloses nothing: New mode deselects, Add / Subtract do nothing.
+        this.session.cropRect = null;
+        if (this.downMode === "replace" && doc.selection) this.deselect(); else this.overlay();
+      } else if (this.session.tool === "marquee" && r) {
         const mask = createCanvas(doc.width, doc.height);
         const ctx = mask.getContext("2d")!;
         ctx.fillStyle = "#fff";
@@ -1709,10 +1989,10 @@ export class App {
         }
         this.setSelection({ type: "rect", x: r.x, y: r.y, w: r.w, h: r.h, ellipse: this.session.marqueeShape === "ellipse" }, mask, this.downMode);
         this.session.cropRect = null;
-        this.commit("Marquee selection");
+        this.commit(this.session.marqueeShape === "ellipse" ? "Elliptical Marquee" : "Rectangular Marquee");
       } else if (this.session.tool === "lasso") {
-        if (this.lassoPoints.length > 2) this.finishLasso(selectionMode(e));
-        else this.cancelLasso();
+        if (this.lassoPoints.length > 2) this.finishLasso(this.downMode);
+        else { this.cancelLasso(); if (this.downMode === "replace" && doc.selection) this.deselect(); }
       } else if (this.session.tool === "gradient" && this.session.dragLine) {
         this.applyGradient(this.session.dragLine);
       } else if (this.session.tool === "shape" && r && r.w > 1 && r.h > 1) {
@@ -1737,6 +2017,27 @@ export class App {
     else this.cancelLasso();
   }
 
+  /**
+   * Magic Wand: pixels within Tolerance of the clicked colour (every channel, alpha too),
+   * read from every visible layer as shown or from the active layer alone. Nothing matched
+   * in New mode deselects.
+   */
+  magicWand(p: { x: number; y: number }, mode: Selection["mode"]): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const s = this.session;
+    const sx = Math.floor(p.x), sy = Math.floor(p.y);
+    if (sx < 0 || sy < 0 || sx >= doc.width || sy >= doc.height) return;
+    const layer = this.activeLayer;
+    const src = s.wandSampleAll ? flattenDocument(doc)
+      : layer?.canvas && layer.kind !== "group" ? layerInDocument(doc, layer) : createCanvas(doc.width, doc.height);
+    const data = imageDataOf(src);
+    const mask = s.wandContiguous ? floodSelect(data, sx, sy, s.wandTolerance, s.wandSampleSize) : colorSelect(data, sx, sy, s.wandTolerance, s.wandSampleSize);
+    if (!mask) { if (mode === "replace" && doc.selection) this.deselect(); return; }
+    this.setSelection({ type: "path", points: [[p.x, p.y]] }, mask, mode);
+    this.commit("Magic Wand");
+  }
+
   /** Drop the lasso outline in progress (Esc). */
   cancelLasso(): void {
     this.lassoPoints = [];
@@ -1755,11 +2056,19 @@ export class App {
     for (let i = 1; i < this.lassoPoints.length; i++) ctx.lineTo(this.lassoPoints[i][0], this.lassoPoints[i][1]);
     ctx.closePath();
     ctx.fill();
+    const polygon = this.session.lassoMode === "polygon";
+    if (!maskBounds(mask)) {
+      // An outline with no area: New deselects, Add / Subtract do nothing.
+      this.lassoPoints = [];
+      this.session.lassoPath = null;
+      if (mode === "replace" && doc.selection) this.deselect(); else this.overlay();
+      return;
+    }
     this.setSelection({ type: "path", points: [...this.lassoPoints] }, mask, mode);
     this.lassoPoints = [];
     this.session.lassoPath = null;
     this.session.cropRect = null;
-    this.commit("Lasso selection");
+    this.commit(polygon ? "Polygonal Lasso" : "Lasso");
   }
 
   /**

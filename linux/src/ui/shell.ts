@@ -112,7 +112,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       syncTextEditor();
       const doc = app.doc;
       drawEditor(canvas, doc, app.session, (ctx) => {
-        if (doc?.selection?.mask) drawAnts(ctx, doc.selection.mask, app.session.zoom || 1, performance.now() / 60);
+        if (doc?.selection?.mask) drawAnts(ctx, doc.selection.outline ?? doc.selection.mask, app.session.zoom || 1, performance.now() / 120);
         drawTransformControls(ctx);
         drawBrushPreview(ctx);
         const line = app.session.dragLine;
@@ -141,34 +141,36 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         const lasso = app.session.lassoPath;
         if (lasso && lasso.length >= 1 && app.session.tool === "lasso") {
           const z = app.session.zoom || 1;
-          const accent = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7aa2f7";
           ctx.save();
-          ctx.lineWidth = 1.5 / z;
           ctx.lineJoin = "round";
           ctx.beginPath();
           ctx.moveTo(lasso[0][0], lasso[0][1]);
           for (let i = 1; i < lasso.length; i++) ctx.lineTo(lasso[i][0], lasso[i][1]);
-          ctx.strokeStyle = "rgba(0,0,0,0.6)";
-          ctx.lineWidth = 3 / z;
+          if (app.session.lassoMode === "polygon" && app.session.hover) ctx.lineTo(app.session.hover.x, app.session.hover.y); // rubber band
+          ctx.strokeStyle = "rgba(0,0,0,0.8)";
+          ctx.lineWidth = 2 / z;
           ctx.stroke();
-          ctx.strokeStyle = accent;
-          ctx.lineWidth = 1.5 / z;
+          ctx.strokeStyle = "#fff";
+          ctx.lineWidth = 1 / z;
           ctx.stroke();
-          if (lasso.length >= 2) {
-            // closing edge, dashed
-            ctx.setLineDash([4 / z, 4 / z]);
-            ctx.beginPath();
-            ctx.moveTo(lasso[lasso.length - 1][0], lasso[lasso.length - 1][1]);
-            ctx.lineTo(lasso[0][0], lasso[0][1]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-          }
           if (app.session.lassoMode === "polygon") {
-            // corners, and a ring on the first one: click it to close
-            for (const [x, y] of lasso) { ctx.fillStyle = accent; ctx.beginPath(); ctx.arc(x, y, 2.5 / z, 0, Math.PI * 2); ctx.fill(); }
-            ctx.strokeStyle = "#fff"; ctx.lineWidth = 1 / z;
-            ctx.beginPath(); ctx.arc(lasso[0][0], lasso[0][1], 5 / z, 0, Math.PI * 2); ctx.stroke();
+            // the first corner gets a handle: click it to close
+            const h = 8 / z;
+            ctx.fillStyle = "#fff"; ctx.strokeStyle = "#000"; ctx.lineWidth = 1 / z;
+            ctx.beginPath(); ctx.rect(lasso[0][0] - h / 2, lasso[0][1] - h / 2, h, h); ctx.fill(); ctx.stroke();
           }
+          ctx.restore();
+          return;
+        }
+        if (app.session.tool === "marquee" && app.session.cropRect) {
+          const z = app.session.zoom || 1;
+          const r = app.session.cropRect;
+          ctx.save();
+          ctx.beginPath();
+          if (app.session.marqueeShape === "ellipse") ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, r.w / 2, r.h / 2, 0, 0, Math.PI * 2);
+          else ctx.rect(r.x, r.y, r.w, r.h);
+          ctx.strokeStyle = "rgba(0,0,0,0.8)"; ctx.lineWidth = 2 / z; ctx.stroke();
+          ctx.strokeStyle = "#fff"; ctx.lineWidth = 1 / z; ctx.stroke();
           ctx.restore();
           return;
         }
@@ -603,12 +605,14 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "Undo", shortcut: "⌘Z", action: () => app.undo() },
       { label: "Redo", shortcut: "⇧⌘Z", action: () => app.redo() },
       { sep: true, label: "" },
+      { label: "Cut", shortcut: "⌘X", action: () => void app.cutSelection().catch(console.error) },
       { label: "Copy", shortcut: "⌘C", action: () => void app.copyToClipboard(false).catch(console.error) },
       { label: "Copy Merged", shortcut: "⇧⌘C", action: () => void app.copyToClipboard(true).catch(console.error) },
       { label: "Paste as Layer", shortcut: "⌘V", action: () => void app.pasteFromClipboard().catch(console.error) },
       { sep: true, label: "" },
-      { label: "Fill Foreground", shortcut: "⌥⌫", action: () => app.fillActive() },
-      { label: "Clear", shortcut: "⌫", action: () => app.clearActive() },
+      { label: "Fill with Foreground Color", shortcut: "⌥⌫", action: () => app.fillActive() },
+      { label: "Fill with Background Color", shortcut: "⌘⌫", action: () => app.fillActive(app.session.background) },
+      { label: "Clear Selection Pixels", shortcut: "⌫", action: () => app.clearActive() },
       { label: "Invert Pixels", shortcut: "⌘I", action: () => app.invertActive() },
       { sep: true, label: "" },
       { label: "Free Transform", shortcut: "⌘T", action: () => app.setTool("move") },
@@ -620,6 +624,12 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "All", shortcut: "⌘A", action: () => app.selectAll() },
       { label: "Deselect", shortcut: "⌘D", action: () => app.deselect() },
       { label: "Inverse", shortcut: "⇧⌘I", action: () => app.invertSelection() },
+      { label: "Layer's Pixels", action: () => app.selectLayerPixels() },
+      { label: "Mask's Black Areas", action: () => app.selectMaskBlack() },
+      { sep: true, label: "" },
+      { label: "Expand…", action: () => promptSelectionAmount("Expand") },
+      { label: "Contract…", action: () => promptSelectionAmount("Contract") },
+      { label: "Feather…", action: () => promptSelectionAmount("Feather") },
       { sep: true, label: "" },
       { label: "Layer via Copy", shortcut: "⌘J", action: () => app.layerViaCopy(false) },
       { label: "Layer via Cut", shortcut: "⇧⌘J", action: () => app.layerViaCopy(true) },
@@ -793,13 +803,6 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       return f;
     };
 
-    const selectionHint = () => {
-      const hint = document.createElement("div");
-      hint.className = "hint";
-      hint.textContent = "Shift adds to the selection · Alt subtracts";
-      return hint;
-    };
-
     const range = (value: number, min: number, max: number, step: number, on: (v: number) => void) => {
       const input = document.createElement("input");
       input.type = "range";
@@ -930,28 +933,70 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         : tool === "blur" ? `Drag to ${s.smearMode === "liquify" ? "push pixels" : s.smearMode === "blur" ? "soften" : "smudge"} · [ ] size · Shift-[ ] hardness · 1–0 strength · Space to pan`
         : `Drag to ${s.brushMode === "erase" ? "erase" : "paint"} · [ ] size · Shift-[ ] hardness · 1–0 opacity · Escape cancel · Space to pan`;
       toolHeader.append(tip);
-    } else if (tool === "marquee") {
-      const sel = document.createElement("select");
-      sel.innerHTML = `<option value="rect">Rectangle</option><option value="ellipse">Ellipse</option>`;
-      sel.value = s.marqueeShape;
-      sel.addEventListener("change", () => { s.marqueeShape = sel.value as "rect" | "ellipse"; app.emit(); });
-      toolHeader.append(field("Shape", sel), selectionHint());
-    } else if (tool === "lasso") {
-      const sel = document.createElement("select");
-      sel.innerHTML = `<option value="free">Freehand</option><option value="polygon">Polygonal</option>`;
-      sel.value = s.lassoMode;
-      sel.addEventListener("change", () => { s.lassoMode = sel.value as "free" | "polygon"; app.cancelLasso(); app.emit(); });
+    } else if (tool === "marquee" || tool === "lasso" || tool === "wand") {
+      const sel = app.doc?.selection ?? null;
+      if (tool === "marquee") toolHeader.append(field("Shape", segmented([{ value: "rect", label: "Rectangle" }, { value: "ellipse", label: "Ellipse" }] as const, s.marqueeShape, (v) => { s.marqueeShape = v; app.cancelLasso(); app.emitView(); }, "Press Tab to switch between Rectangle and Ellipse")));
+      if (tool === "lasso") toolHeader.append(field("Lasso", segmented([{ value: "free", label: "Freehand" }, { value: "polygon", label: "Polygonal" }] as const, s.lassoMode, (v) => { s.lassoMode = v; app.cancelLasso(); app.emitView(); }, "Press Tab to switch between Freehand and Polygonal")));
+      toolHeader.append(field("Mode", segmented([{ value: "replace", label: "New" }, { value: "add", label: "Add" }, { value: "subtract", label: "Subtract" }] as const, app.displayedSelectionMode() as "replace" | "add" | "subtract", (v) => { s.selectionModeChoice = v; app.emitView(); }, "Hold Shift to add or Option to subtract for one outline")));
+      if (tool === "wand") {
+        toolHeader.append(field("Tolerance", numberField(s.wandTolerance, 0, 255, 1, (v) => { s.wandTolerance = Math.round(v); }, { width: 50, help: "How far each color channel (0–255) can differ from the clicked color and still be selected" })));
+        const size = document.createElement("select");
+        size.innerHTML = `<option value="0">Point Sample</option><option value="1">3 by 3 Average</option><option value="2">5 by 5 Average</option>`;
+        size.value = String(s.wandSampleSize);
+        size.title = "Match the clicked pixel, or the average of the pixels around it";
+        size.addEventListener("change", () => { s.wandSampleSize = Number(size.value) as 0 | 1 | 2; });
+        toolHeader.append(field("Sample Size", size));
+        toolHeader.append(field("Sample", segmented([{ value: "layer", label: "This Layer" }, { value: "all", label: "All Layers" }] as const, s.wandSampleAll ? "all" : "layer", (v) => { s.wandSampleAll = v === "all"; app.emitView(); }, "Read colors from the active layer only, or from every visible layer as shown")));
+        const contiguous = document.createElement("button");
+        contiguous.className = "toggle" + (s.wandContiguous ? " active" : "");
+        contiguous.textContent = "Contiguous";
+        contiguous.title = "Select only similar pixels connected to the one you click; off selects them everywhere";
+        contiguous.addEventListener("click", () => { s.wandContiguous = !s.wandContiguous; app.emitView(); });
+        toolHeader.append(contiguous);
+      }
+      if (tool !== "marquee" || s.marqueeShape === "ellipse") {
+        // Rectangles snap to whole pixels, so smoothing does not apply (as in Photoshop); ellipses curve.
+        const aa = document.createElement("button");
+        aa.className = "toggle" + (s.selectionAntialiased ? " active" : "");
+        aa.textContent = "Anti-alias";
+        aa.title = "Smooth selection edges; turn off for hard pixel edges";
+        aa.addEventListener("click", () => { s.selectionAntialiased = !s.selectionAntialiased; app.emitView(); });
+        toolHeader.append(aa);
+      }
+      const divider = document.createElement("div");
+      divider.className = "divider";
+      toolHeader.append(divider);
+      const canModify = app.hasSelection() && !app.isSelectionEmpty() && !s.lassoPath;
+      const amount = (label: string, value: number, max: number, help: string, onAmount: (v: number) => void, run: () => void) => {
+        const b = document.createElement("button");
+        b.textContent = label;
+        b.title = help;
+        b.disabled = !canModify;
+        b.addEventListener("click", run);
+        const f = numberField(value, 1, max, 1, onAmount, { unit: "px", width: 44 });
+        f.querySelector("input")!.disabled = !canModify;
+        const wrap = document.createElement("div");
+        wrap.className = "field";
+        wrap.append(b, f);
+        return wrap;
+      };
+      toolHeader.append(
+        amount("Expand", s.selectionExpandAmount, 500, "Expand the selection by this many pixels", (v) => { s.selectionExpandAmount = v; }, () => app.resizeSelection(s.selectionExpandAmount)),
+        amount("Contract", s.selectionContractAmount, 500, "Contract the selection by this many pixels", (v) => { s.selectionContractAmount = v; }, () => app.resizeSelection(-s.selectionContractAmount)),
+        amount("Feather", s.selectionFeatherAmount, 250, "Fade the edge of the selection by this many pixels", (v) => { s.selectionFeatherAmount = v; }, () => app.featherSelection(s.selectionFeatherAmount)),
+      );
+      if (sel && app.isSelectionEmpty()) { const empty = document.createElement("div"); empty.className = "hint"; empty.textContent = "Empty selection"; toolHeader.append(empty); }
+      if (sel) { const d = document.createElement("button"); d.textContent = "Deselect"; d.addEventListener("click", () => app.deselect()); toolHeader.append(d); }
       const how = document.createElement("div");
       how.className = "hint";
-      how.textContent = s.lassoMode === "polygon" ? "Click corners · double-click, Enter or the first corner closes · Esc cancels" : "Drag around the area · release to close";
-      toolHeader.append(field("Mode", sel), how, selectionHint());
-    } else if (tool === "wand") {
-      const contiguous = document.createElement("button");
-      contiguous.className = "toggle" + (s.wandContiguous ? " active" : "");
-      contiguous.textContent = "Contiguous";
-      contiguous.title = "Only pixels connected to the click (off: every matching colour in the image)";
-      contiguous.addEventListener("click", () => { s.wandContiguous = !s.wandContiguous; app.emitView(); });
-      toolHeader.append(field("Tolerance", range(s.wandTolerance, 0, 128, 1, (v) => { s.wandTolerance = v; })), contiguous, selectionHint());
+      how.textContent = tool === "marquee"
+        ? (s.marqueeShape === "ellipse" ? "Drag an ellipse · Shift add · Option subtract · Shift again mid-drag circle · Drag inside to move · Delete clears · ⌘D deselect"
+          : "Drag a rectangle · Shift add · Option subtract · Shift again mid-drag square · Drag inside to move · ⌘-drag moves pixels · Delete clears · ⌘D deselect")
+        : tool === "lasso"
+          ? (s.lassoMode === "polygon" ? "Click corners · Click start, double-click or Enter to close · Delete removes corner · Escape cancel"
+            : "Drag to select · Drag inside to move · Shift add · Option subtract · Delete clears · ⌥⌫/⌘⌫ fill · ⌘D deselect")
+          : "Click to select similar colors · Shift add · Option subtract · Drag inside to move · ⌘-drag moves pixels · Delete clears · ⌘D deselect";
+      toolHeader.append(how);
     } else if (tool === "shape") {
       const sel = document.createElement("select");
       sel.innerHTML = `<option value="rect">Rectangle</option><option value="rounded">Rounded</option><option value="ellipse">Ellipse</option><option value="line">Line</option>`;
@@ -1550,12 +1595,22 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { label: "Fill with Background", shortcut: "⌘⌫", action: () => app.fillActive(app.session.background), disabled: !pixels },
       { label: "Clear", shortcut: "⌫", action: () => app.clearActive(), disabled: !pixels },
       { sep: true, label: "" },
+      { label: "Cut", shortcut: "⌘X", action: () => void app.cutSelection().catch(reportError) },
       { label: "Copy", shortcut: "⌘C", action: () => void app.copyToClipboard(false).catch(reportError) },
       { label: "Copy Merged", shortcut: "⇧⌘C", action: () => void app.copyToClipboard(true).catch(reportError) },
       { label: "Free Transform", shortcut: "⌘T", action: () => app.setTool("move") },
     ];
   }
   const mods = { shift: false, alt: false, dragging: false };
+  const selectionToolActive = () => app.session.tool === "marquee" || app.session.tool === "lasso" || app.session.tool === "wand";
+  /** Highlight the Mode the held keys imply without rebuilding the header. */
+  function syncModePicker(): void {
+    const mode = app.displayedSelectionMode();
+    const seg = [...toolHeader.querySelectorAll<HTMLElement>(".field")].find((f) => f.querySelector("label")?.textContent === "Mode")?.querySelector(".seg");
+    if (!seg) return;
+    const labels = { replace: "New", add: "Add", subtract: "Subtract" } as const;
+    for (const b of seg.querySelectorAll("button")) b.classList.toggle("active", b.textContent === labels[mode as keyof typeof labels]);
+  }
   function applyCursor(e?: PointerEvent): void {
     const tool = app.session.tool;
     let cursor = cursorForTool({ tool, ...mods, space: app.tempHand });
@@ -1567,7 +1622,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     mods.alt = e.altKey;
     mods.dragging = e.buttons !== 0;
     applyCursor(e);
-    if (PAINT_TOOLS.includes(app.session.tool) && app.doc) {
+    if ((PAINT_TOOLS.includes(app.session.tool) || (app.session.tool === "lasso" && app.session.lassoPath)) && app.doc) {
       const { screenToDoc } = compositorApi;
       app.session.hover = screenToDoc(canvas, app.doc, app.session, e.clientX, e.clientY);
       if (e.buttons === 0) requestDraw();
@@ -1582,7 +1637,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     return !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
   };
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Shift" || e.key === "Alt") { mods.shift = e.shiftKey; mods.alt = e.altKey; applyCursor(); }
+    if (e.key === "Shift" || e.key === "Alt") { mods.shift = e.shiftKey; mods.alt = e.altKey; applyCursor(); app.modifiersChanged(canvas, e); if (selectionToolActive()) syncModePicker(); }
     if (e.key === " " && !inField(e) && !app.session.textEdit) {
       // Space: temporary Hand with any tool (Photoshop). Holding it must not scroll the page.
       e.preventDefault();
@@ -1590,7 +1645,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     }
   });
   window.addEventListener("keyup", (e) => {
-    if (e.key === "Shift" || e.key === "Alt") { mods.shift = e.shiftKey; mods.alt = e.altKey; applyCursor(); }
+    if (e.key === "Shift" || e.key === "Alt") { mods.shift = e.shiftKey; mods.alt = e.altKey; applyCursor(); app.modifiersChanged(canvas, e); if (selectionToolActive()) syncModePicker(); }
     if (e.key === " " && app.tempHand) { app.tempHand = false; applyCursor(); }
   });
   window.addEventListener("blur", () => { if (app.tempHand) { app.tempHand = false; applyCursor(); } });
@@ -1693,17 +1748,21 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       return;
     }
     if (e.key === "Backspace" || e.key === "Delete") {
+      e.preventDefault();
       if (e.altKey) app.fillActive();
-      else app.clearActive();
+      else if (mod) app.fillActive(app.session.background);
+      else app.deleteKeyPressed();
       return;
     }
+    if (mod && key === "x") { e.preventDefault(); void app.cutSelection().catch(reportError); return; }
     if (e.key.startsWith("Arrow")) {
       e.preventDefault();
       const d = e.shiftKey ? 10 : 1;
-      if (e.key === "ArrowLeft") app.nudge(-d, 0);
-      if (e.key === "ArrowRight") app.nudge(d, 0);
-      if (e.key === "ArrowUp") app.nudge(0, -d);
-      if (e.key === "ArrowDown") app.nudge(0, d);
+      const dx = e.key === "ArrowLeft" ? -d : e.key === "ArrowRight" ? d : 0;
+      const dy = e.key === "ArrowUp" ? -d : e.key === "ArrowDown" ? d : 0;
+      if (mod && app.hasSelection()) app.nudgePixels(dx, dy); // ⌘-arrows move the selected pixels with any tool
+      else if (selectionToolActive() && app.hasSelection()) app.nudgeSelection(dx, dy);
+      else app.nudge(dx, dy);
       return;
     }
     if (!mod && !e.altKey && key === "x") { app.swapColors(); return; }
@@ -1903,6 +1962,28 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       doc.width = nw;
       doc.height = nh;
       app.commit("Image size");
+    });
+  }
+
+  /** Select › Expand… / Contract… / Feather…: a whole number of pixels, remembered in the header. */
+  function promptSelectionAmount(op: "Expand" | "Contract" | "Feather"): void {
+    const s = app.session;
+    const max = op === "Feather" ? 250 : 500;
+    const current = op === "Expand" ? s.selectionExpandAmount : op === "Contract" ? s.selectionContractAmount : s.selectionFeatherAmount;
+    const r = numInput(current);
+    r.min = "1"; r.max = String(max); r.step = "1";
+    const body = document.createElement("div");
+    body.append(fieldRow("Amount", r));
+    const note = document.createElement("div");
+    note.className = "hint";
+    note.textContent = `Enter a whole number from 1 to ${max} px.`;
+    body.append(note);
+    modal(`${op} Selection`, body, () => {
+      const v = Math.round(Number(r.value));
+      if (!Number.isInteger(v) || v < 1 || v > max) { reportError(`Enter a whole number from 1 to ${max} px.`); return; }
+      if (op === "Expand") { s.selectionExpandAmount = v; app.resizeSelection(v); }
+      else if (op === "Contract") { s.selectionContractAmount = v; app.resizeSelection(-v); }
+      else { s.selectionFeatherAmount = v; app.featherSelection(v); }
     });
   }
 

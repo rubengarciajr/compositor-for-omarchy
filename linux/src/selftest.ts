@@ -890,6 +890,105 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
   {
     check("no native title bubbles left", document.querySelectorAll(".app-shell [title]").length === 0 && document.querySelectorAll(".app-shell [data-tip]").length > 10, document.querySelectorAll(".app-shell [data-tip]").length);
   }
+  // Selection tools follow Compositor 1.3: whole-pixel marquees, the Shift rule, moving outlines
+  // and pixels, Expand / Contract / Feather, per-channel wand tolerance, Layer's Pixels.
+  {
+    app.newDocument(80, 60, "selection");
+    const view = document.getElementById("editor") as HTMLCanvasElement;
+    const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
+      const rect = view.getBoundingClientRect();
+      const z = app.session.zoom;
+      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
+      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
+    };
+    const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}, mid?: { shift?: boolean }) => {
+      app.pointerDown(view, ev(x0, y0, m));
+      app.pointerMove(view, ev((x0 + x1) / 2, (y0 + y1) / 2, mid ? { ...m, ...mid } : m));
+      app.pointerMove(view, ev(x1, y1, mid ? { ...m, ...mid } : m));
+      app.pointerUp(view, ev(x1, y1, mid ? { ...m, ...mid } : m));
+    };
+    /** Bounds of the at-least-half-selected pixels of the crisp outline. */
+    const bounds = () => {
+      const m = app.doc!.selection?.outline ?? app.doc!.selection?.mask;
+      if (!m) return null;
+      const d = m.getContext("2d")!.getImageData(0, 0, m.width, m.height).data;
+      let x0 = m.width, y0 = m.height, x1 = -1, y1 = -1;
+      for (let y = 0; y < m.height; y++) for (let x = 0; x < m.width; x++) if (d[(y * m.width + x) * 4 + 3] >= 128) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+    };
+    app.setTool("marquee");
+    app.session.selectionModeChoice = "replace";
+    drag(10.4, 10.6, 30.2, 20.3);
+    check("marquee snaps to whole pixels", JSON.stringify(bounds()) === JSON.stringify({ x: 10, y: 11, w: 20, h: 9 }), bounds());
+    drag(40, 30, 50, 45, { shift: true }); // Shift at the press adds, and does not square
+    check("Shift at the press adds without squaring", JSON.stringify(bounds()) === JSON.stringify({ x: 10, y: 11, w: 40, h: 34 }), bounds());
+    drag(10, 10, 40, 20, {}, { shift: true }); // a fresh Shift mid-drag squares
+    check("Shift pressed mid-drag squares the marquee", JSON.stringify(bounds()) === JSON.stringify({ x: 10, y: 10, w: 30, h: 30 }), bounds());
+    app.pointerDown(view, ev(60, 5)); app.pointerUp(view, ev(60, 5)); // click outside without a drag
+    check("a click that encloses nothing deselects", app.doc!.selection === null, app.doc!.selection);
+    drag(10, 10, 30, 20);
+    drag(15, 15, 25, 18); // inside in New mode: moves the outline
+    check("dragging inside the selection moves the outline", JSON.stringify(bounds()) === JSON.stringify({ x: 20, y: 13, w: 20, h: 10 }), bounds());
+    app.nudgeSelection(-10, -3);
+    check("arrows nudge the outline", JSON.stringify(bounds()) === JSON.stringify({ x: 10, y: 10, w: 20, h: 10 }), bounds());
+    // ⌘-drag inside moves the selected pixels (and the outline with them).
+    const layer = app.activeLayer!;
+    const lc = writableLayer(layer)!.getContext("2d")!;
+    lc.clearRect(0, 0, 80, 60); lc.fillStyle = "#000"; lc.fillRect(10, 10, 20, 10);
+    app.commit("Square");
+    const before = app.doc!.layers.length;
+    drag(15, 15, 35, 15, { ctrl: true });
+    const movedPx = px(layer.canvas!, 45, 15), oldPx = px(layer.canvas!, 15, 15);
+    check("⌘-drag moves the selected pixels", movedPx[3] === 255 && oldPx[3] === 0 && bounds()!.x === 30 && app.doc!.layers.length === before, { movedPx, oldPx, bounds: bounds() });
+    drag(35, 15, 35, 35, { ctrl: true, alt: true });
+    check("⌘⌥-drag duplicates the pixels", px(layer.canvas!, 45, 15)[3] === 255 && px(layer.canvas!, 45, 35)[3] === 255 && bounds()!.y === 30, { bounds: bounds() });
+    app.undo(); app.undo();
+    check("moving pixels is one undo step", px(app.activeLayer!.canvas!, 15, 15)[3] === 255 && px(app.activeLayer!.canvas!, 45, 15)[3] === 0 && bounds()!.x === 10, bounds());
+    // Expand / Contract / Feather.
+    app.resizeSelection(2);
+    const expanded = bounds();
+    app.resizeSelection(-4);
+    const contracted = bounds();
+    check("Expand and Contract resize the outline", expanded!.x === 8 && expanded!.w === 24 && contracted!.x === 12 && contracted!.w === 16, { expanded, contracted });
+    app.featherSelection(4);
+    const sel = app.doc!.selection!;
+    const edge = px(sel.mask!, 12, 15)[3], middle = px(sel.mask!, 20, 15)[3], outside = px(sel.mask!, 9, 15)[3];
+    check("Feather softens the coverage but keeps the outline", sel.feather === 4 && !!sel.outline && edge > 30 && edge < 225 && middle > 150 && outside > 0 && outside < 128 && bounds()!.x === 12, { edge, middle, outside, feather: sel.feather });
+    // Wand tolerance is per channel, alpha included.
+    app.newDocument(20, 10, "wand");
+    const wc = writableLayer(app.activeLayer!)!.getContext("2d")!;
+    wc.fillStyle = "rgb(100,100,100)"; wc.fillRect(0, 0, 10, 10);
+    wc.fillStyle = "rgb(132,100,100)"; wc.fillRect(10, 0, 10, 10);
+    app.commit("Swatches");
+    app.setTool("wand");
+    app.session.wandContiguous = true; app.session.wandSampleSize = 0; app.session.wandSampleAll = false;
+    app.session.wandTolerance = 31;
+    app.pointerDown(view, ev(2, 5)); app.pointerUp(view, ev(2, 5));
+    const narrow = bounds();
+    app.session.wandTolerance = 32;
+    app.pointerDown(view, ev(2, 5)); app.pointerUp(view, ev(2, 5));
+    const wide = bounds();
+    check("wand tolerance is per channel", narrow!.w === 10 && wide!.w === 20, { narrow, wide });
+    // Select › Layer's Pixels takes at-least-half-opaque pixels only.
+    const alc = writableLayer(app.activeLayer!)!.getContext("2d")!;
+    alc.clearRect(0, 0, 20, 10); alc.fillStyle = "rgba(0,0,0,1)"; alc.fillRect(2, 2, 4, 4); alc.fillStyle = "rgba(0,0,0,0.25)"; alc.fillRect(12, 2, 4, 4);
+    app.commit("Alpha");
+    app.deselect();
+    app.selectLayerPixels();
+    check("Layer's Pixels selects opaque pixels only", JSON.stringify(bounds()) === JSON.stringify({ x: 2, y: 2, w: 4, h: 4 }), bounds());
+    // Polygon lasso: Delete removes the last corner.
+    app.deselect();
+    app.setTool("lasso");
+    app.session.lassoMode = "polygon";
+    app.pointerDown(view, ev(2, 2)); app.pointerUp(view, ev(2, 2));
+    app.pointerDown(view, ev(8, 2)); app.pointerUp(view, ev(8, 2));
+    app.pointerDown(view, ev(8, 8)); app.pointerUp(view, ev(8, 8));
+    app.removeLastLassoPoint();
+    check("Delete removes the last lasso corner", app.session.lassoPath?.length === 2, app.session.lassoPath);
+    app.cancelLasso();
+    app.session.lassoMode = "free";
+  }
   // Cursors and brush keys.
   {
     check("paint tools hide the arrow", cursorForTool({ tool: "brush", shift: false, alt: false, dragging: false }) === "none" && cursorForTool({ tool: "clone-stamp", shift: false, alt: true, dragging: false }) === "crosshair", null);

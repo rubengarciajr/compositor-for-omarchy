@@ -423,8 +423,9 @@ export function invertImage(src: ImageData): ImageData {
   return out;
 }
 
+/** A Gaussian-blurred copy (standard deviation `radius` px); the source is untouched. */
 export function gaussianBlur(src: HTMLCanvasElement, radius: number): HTMLCanvasElement {
-  const out = cloneCanvas(src);
+  const out = createCanvas(src.width, src.height);
   const ctx = out.getContext("2d")!;
   ctx.filter = `blur(${Math.max(0, radius)}px)`;
   ctx.drawImage(src, 0, 0);
@@ -480,61 +481,92 @@ export function stampBrush(
   ctx.restore();
 }
 
-export function floodSelect(
-  src: ImageData,
-  sx: number,
-  sy: number,
-  tolerance: number,
-): HTMLCanvasElement {
+/** The wand's reference colour: the clicked pixel, or the average of the (2r+1)² pixels around it. */
+function wandReference(d: Uint8ClampedArray, w: number, h: number, sx: number, sy: number, radius: number): [number, number, number, number] {
+  if (radius <= 0) { const i = (sy * w + sx) * 4; return [d[i], d[i + 1], d[i + 2], d[i + 3]]; }
+  const acc = [0, 0, 0, 0];
+  let n = 0;
+  for (let y = Math.max(0, sy - radius); y <= Math.min(h - 1, sy + radius); y++) for (let x = Math.max(0, sx - radius); x <= Math.min(w - 1, sx + radius); x++) {
+    const i = (y * w + x) * 4;
+    acc[0] += d[i]; acc[1] += d[i + 1]; acc[2] += d[i + 2]; acc[3] += d[i + 3];
+    n++;
+  }
+  return [acc[0] / n, acc[1] / n, acc[2] / n, acc[3] / n];
+}
+
+/** Compositor's wand match: every channel, alpha included, within `tolerance` (0–255) of the reference. */
+function wandMatches(d: Uint8ClampedArray, i: number, ref: [number, number, number, number], tolerance: number): boolean {
+  return Math.abs(d[i] - ref[0]) <= tolerance && Math.abs(d[i + 1] - ref[1]) <= tolerance && Math.abs(d[i + 2] - ref[2]) <= tolerance && Math.abs(d[i + 3] - ref[3]) <= tolerance;
+}
+
+/** Magic Wand with "Contiguous" on: pixels connected to the click within tolerance. Null when nothing matches. */
+export function floodSelect(src: ImageData, sx: number, sy: number, tolerance: number, sampleRadius = 0): HTMLCanvasElement | null {
   const w = src.width, h = src.height;
   const mask = createCanvas(w, h);
   const mctx = mask.getContext("2d")!;
   const img = mctx.createImageData(w, h);
   const d = src.data, out = img.data;
-  const idx = (x: number, y: number) => (y * w + x) * 4;
-  const start = idx(sx, sy);
-  const sr = d[start], sg = d[start + 1], sb = d[start + 2], sa = d[start + 3];
-  const tol = tolerance * tolerance * 3;
+  const ref = wandReference(d, w, h, sx, sy, sampleRadius);
+  const tol = Math.min(255, Math.max(0, tolerance)) + 1e-6;
   const visited = new Uint8Array(w * h);
   const stack: number[] = [sy * w + sx];
-
+  let count = 0;
   while (stack.length) {
     const p = stack.pop()!;
     if (visited[p]) continue;
     visited[p] = 1;
-    const x = p % w, y = (p / w) | 0;
     const i = p * 4;
-    const dr = d[i] - sr, dg = d[i + 1] - sg, db = d[i + 2] - sb, da = d[i + 3] - sa;
-    if (dr * dr + dg * dg + db * db + da * da > tol) continue;
+    if (!wandMatches(d, i, ref, tol)) continue;
     out[i] = out[i + 1] = out[i + 2] = 255;
     out[i + 3] = 255;
+    count++;
+    const x = p % w, y = (p / w) | 0;
     if (x > 0) stack.push(p - 1);
     if (x < w - 1) stack.push(p + 1);
     if (y > 0) stack.push(p - w);
     if (y < h - 1) stack.push(p + w);
   }
+  if (!count) return null;
   mctx.putImageData(img, 0, 0);
   return mask;
 }
 
-/** Magic Wand with "Contiguous" off: every pixel within tolerance of the clicked colour. */
-export function colorSelect(src: ImageData, sx: number, sy: number, tolerance: number): HTMLCanvasElement {
+/** Magic Wand with "Contiguous" off: every pixel within tolerance of the clicked colour. Null when nothing matches. */
+export function colorSelect(src: ImageData, sx: number, sy: number, tolerance: number, sampleRadius = 0): HTMLCanvasElement | null {
   const w = src.width, h = src.height;
   const mask = createCanvas(w, h);
   const mctx = mask.getContext("2d")!;
   const img = mctx.createImageData(w, h);
   const d = src.data, out = img.data;
-  const start = (sy * w + sx) * 4;
-  const sr = d[start], sg = d[start + 1], sb = d[start + 2], sa = d[start + 3];
-  const tol = tolerance * tolerance * 3;
+  const ref = wandReference(d, w, h, sx, sy, sampleRadius);
+  const tol = Math.min(255, Math.max(0, tolerance)) + 1e-6;
+  let count = 0;
   for (let i = 0; i < d.length; i += 4) {
-    const dr = d[i] - sr, dg = d[i + 1] - sg, db = d[i + 2] - sb, da = d[i + 3] - sa;
-    if (dr * dr + dg * dg + db * db + da * da > tol) continue;
+    if (!wandMatches(d, i, ref, tol)) continue;
     out[i] = out[i + 1] = out[i + 2] = 255;
     out[i + 3] = 255;
+    count++;
   }
+  if (!count) return null;
   mctx.putImageData(img, 0, 0);
   return mask;
+}
+
+/** Hard pixel edges: alpha at or above half becomes full, the rest transparent (Anti-alias off). */
+export function thresholdMask(mask: HTMLCanvasElement): HTMLCanvasElement {
+  const ctx = mask.getContext("2d")!;
+  const img = ctx.getImageData(0, 0, mask.width, mask.height);
+  const d = img.data;
+  for (let i = 3; i < d.length; i += 4) { const on = d[i] >= 128; d[i] = on ? 255 : 0; d[i - 1] = d[i - 2] = d[i - 3] = on ? 255 : 0; }
+  ctx.putImageData(img, 0, 0);
+  return mask;
+}
+
+/** Shift a document-sized mask by whole pixels; what leaves the canvas is dropped. */
+export function translateMask(mask: HTMLCanvasElement, dx: number, dy: number): HTMLCanvasElement {
+  const out = createCanvas(mask.width, mask.height);
+  out.getContext("2d")!.drawImage(mask, Math.round(dx), Math.round(dy));
+  return out;
 }
 
 /** Blur tool: soften the disc of radius `r` around (x, y) in layer pixels; `strength` 0–1. */

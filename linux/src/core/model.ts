@@ -162,10 +162,16 @@ export type SelectionPath = { type: "rect"; x: number; y: number; w: number; h: 
 
 export interface Selection {
   path: SelectionPath;
-  /** Cached mask canvas of document size; white = selected. */
+  /** Coverage of document size; white = selected (feathered when `feather` > 0). */
   mask: HTMLCanvasElement | null;
   mode: "replace" | "add" | "subtract" | "intersect";
+  /** Feather in document pixels (0 = hard edge); the fade spreads both sides of the outline. */
+  feather?: number;
+  /** The crisp outline the marching ants follow when the coverage is feathered. */
+  outline?: HTMLCanvasElement | null;
 }
+
+export type SelectionModeChoice = "replace" | "add" | "subtract";
 
 export interface DocumentState {
   id: string;
@@ -222,9 +228,23 @@ export interface SessionState {
   background: string;
   marqueeShape: MarqueeShape;
   lassoMode: LassoMode;
+  /** Header "Mode": New / Add / Subtract; Shift and Option override it for one outline. */
+  selectionModeChoice: SelectionModeChoice;
+  /** Mode implied by the modifier keys currently held (what the header highlights). */
+  heldSelectionMode: "add" | "subtract" | null;
+  /** Smooth selection edges (ellipses, lassos, wand outlines); off = hard pixel edges. */
+  selectionAntialiased: boolean;
+  selectionExpandAmount: number;
+  selectionContractAmount: number;
+  selectionFeatherAmount: number;
+  /** Magic Wand tolerance per channel, 0–255. */
   wandTolerance: number;
   /** Magic Wand: only pixels connected to the click (Photoshop "Contiguous"). */
   wandContiguous: boolean;
+  /** Magic Wand sample: 0 = point, 1 = 3×3 average, 2 = 5×5 average. */
+  wandSampleSize: 0 | 1 | 2;
+  /** Magic Wand reads every visible layer as shown (true) or the active layer alone. */
+  wandSampleAll: boolean;
   shapeKind: ShapeKind;
   activeLayerId: string | null;
   selectedLayerIds: string[];
