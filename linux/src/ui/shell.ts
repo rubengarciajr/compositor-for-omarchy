@@ -10,7 +10,7 @@ import { PAINT_TOOLS, cursorForTool } from "./cursors";
 import { icon, iconEl } from "./icons";
 import { THEME_CHOICES, applyThemeChoice, themeChoice } from "../theme/omarchy";
 import type { IconName } from "./icons";
-import { cssFont, textScale } from "../core/pixels";
+import { cssFont, textPad, textScale } from "../core/pixels";
 import { GRADIENT_PRESETS, gradientCss, gradientStops } from "../core/gradient";
 import type { GradientStyle } from "../core/gradient";
 
@@ -519,16 +519,18 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     const rect = canvas.getBoundingClientRect();
     const ox = rect.width / 2 + app.session.panX - (doc.width * z) / 2;
     const oy = rect.height / 2 + app.session.panY - (doc.height * z) / 2;
-    const pad = Math.ceil(t.fontSize * 0.25) * z;
+    const pad = textPad(t) * z;
+    // CSS centres glyphs in their line box; the canvas draws them from the em top. Shift by the half-leading.
+    const halfLead = ((t.lineHeight - 1) * t.fontSize * z) / 2;
     const s = textEditor.style;
     s.left = `${ox + tr.x * z}px`;
     s.top = `${oy + tr.y * z}px`;
     const { sx, sy } = textScale(layer); // type stretched by the handles keeps its ratio while editing
     s.width = `${Math.max(tr.width / sx * z, t.fontSize * z)}px`;
-    s.height = `${Math.max(tr.height / sy * z, t.fontSize * t.lineHeight * z)}px`;
+    s.height = `${Math.max(tr.height / sy * z, t.fontSize * z) + Math.max(0, halfLead)}px`;
     s.transformOrigin = "0 0";
     s.transform = `translate(${(tr.width * z) / 2}px, ${(tr.height * z) / 2}px) rotate(${tr.rotation}deg) translate(${(-tr.width * z) / 2}px, ${(-tr.height * z) / 2}px) scale(${sx}, ${sy})`;
-    s.padding = `${pad}px`;
+    s.padding = `${Math.max(0, pad - halfLead)}px ${pad}px ${pad}px`;
     s.font = cssFont({ weight: t.weight, fontSize: t.fontSize * z, fontFamily: t.fontFamily });
     s.lineHeight = `${t.fontSize * t.lineHeight * z}px`;
     s.letterSpacing = `${t.letterSpacing * z}px`;

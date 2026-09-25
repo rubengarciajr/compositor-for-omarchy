@@ -19,6 +19,8 @@ Brings the Linux port up to the features Compositor for macOS shipped between 1.
 
 ### Fixed
 - **Scaled type stays sharp.** Dragging a text layer's handles used to stretch a bitmap rendered at the original font size, so enlarged text went blurry. Type is now re-rendered at its displayed size (bitmaps capped at 8192 px a side), and a uniform scale becomes the layer's font size when the drag ends, as in Photoshop's Free Transform, so the Size field and the on-canvas editor stay truthful. Editing scaled text keeps its size, and Reset Transform returns it to the font's natural size.
+- **Type box and editor line up.** The on-canvas text editor was positioned against the page instead of the canvas, so the text you typed appeared offset from where the layer really was until you switched tools; it now sits exactly on the layer. The type box hugs the glyphs (a tenth of the font size of padding, no spare leading under the last line) instead of leaving a large gap below and to the right.
+- **Type and moved layers stay on whole pixels.** Text placed with a click, moves with the Move tool and scaled type land on integer coordinates, so nothing is resampled and edges stay crisp.
 
 ## 1.1.1 — 2026-09-23
 

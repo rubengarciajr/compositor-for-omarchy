@@ -1189,7 +1189,7 @@ export class App {
       kind: "text",
       text: data,
       canvas: createCanvas(1, 1),
-      transform: defaultTransform(1, 1, x, y),
+      transform: defaultTransform(1, 1, Math.round(x), Math.round(y)), // whole pixels keep the glyphs sharp
     });
     drawTextLayer(layer); // sizes the bitmap to the text
     doc.layers.push(layer);
@@ -1428,6 +1428,7 @@ export class App {
       const origin = this.moveOrigin ?? this.moveStart;
       let tx = p.x - origin.x, ty = p.y - origin.y;
       if (e.shiftKey) { if (Math.abs(tx) >= Math.abs(ty)) ty = 0; else tx = 0; }
+      tx = Math.round(tx); ty = Math.round(ty); // move by whole pixels, as Photoshop does, so nothing gets resampled
       const dx = tx - this.moveApplied.x;
       const dy = ty - this.moveApplied.y;
       this.moveApplied = { x: tx, y: ty };
@@ -1819,6 +1820,8 @@ export class App {
     if (layer.id === this.session.activeLayerId) Object.assign(this.session.text, { fontSize: t.fontSize, letterSpacing: t.letterSpacing });
     writableLayer(layer);
     fitTextLayer(layer, { sx: sx / applied, sy: sy / applied });
+    layer.transform.x = Math.round(layer.transform.x);
+    layer.transform.y = Math.round(layer.transform.y);
   }
 
   /** Undo scaling and rotation: back to the bitmap's own size, no flips. */

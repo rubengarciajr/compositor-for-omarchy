@@ -687,8 +687,14 @@ export function textNaturalSize(layer: Layer): { w: number; h: number } {
       : ctx.measureText(line).width;
     maxW = Math.max(maxW, w);
   }
-  const pad = Math.ceil(t.fontSize * 0.25);
-  return { w: Math.ceil(maxW + pad * 2), h: Math.ceil(lines.length * t.fontSize * t.lineHeight + pad * 2) };
+  const pad = textPad(t);
+  // The last line needs only its em height, not a full leading, so the box hugs the glyphs.
+  return { w: Math.ceil(maxW + pad * 2), h: Math.ceil((lines.length - 1) * t.fontSize * t.lineHeight + t.fontSize + pad * 2) };
+}
+
+/** Breathing room around the glyphs (overhangs, italics) in natural units. */
+export function textPad(t: { fontSize: number }): number {
+  return Math.ceil(t.fontSize * 0.1);
 }
 
 /** How much the transform stretches a text layer beyond its font size (1 = unscaled). */
@@ -715,8 +721,8 @@ export function fitTextLayer(layer: Layer, scale?: { sx: number; sy: number }): 
   if (!(sx > 0) || !isFinite(sx)) sx = 1;
   if (!(sy > 0) || !isFinite(sy)) sy = 1;
   textNatural.set(layer, natural);
-  tr.width = natural.w * sx;
-  tr.height = natural.h * sy;
+  tr.width = Math.max(1, Math.round(natural.w * sx)); // whole pixels, so the bitmap is never resampled
+  tr.height = Math.max(1, Math.round(natural.h * sy));
   // Bitmap at the displayed size, capped so a huge headline cannot eat memory.
   let bw = Math.max(1, Math.round(natural.w * sx));
   let bh = Math.max(1, Math.round(natural.h * sy));
@@ -734,7 +740,7 @@ export function drawTextLayer(layer: Layer): void {
   const { text: t, canvas } = layer;
   const natural = textNatural.get(layer)!;
   const ctx = canvas.getContext("2d")!;
-  const pad = Math.ceil(t.fontSize * 0.25);
+  const pad = textPad(t);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.scale(canvas.width / natural.w, canvas.height / natural.h); // glyphs are laid out in natural units

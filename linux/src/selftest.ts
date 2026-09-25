@@ -776,6 +776,12 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const n = app.doc!.layers.length;
     app.pointerDown(view, ev(made.transform.x + 5, made.transform.y + 5)); app.pointerUp(view, ev(made.transform.x + 5, made.transform.y + 5));
     check("clicking text edits in place", app.session.textEdit?.layerId === made.id && app.doc!.layers.length === n, app.session.textEdit);
+    // The on-canvas editor sits exactly on the layer (it used to be offset by the toolbar and headers).
+    await new Promise((r) => requestAnimationFrame(() => r(null)));
+    const ta = document.querySelector<HTMLElement>(".text-editor");
+    const tr = ta?.getBoundingClientRect();
+    const want = { left: ox + made.transform.x * z, top: oy + made.transform.y * z };
+    check("text editor overlays the layer", !!tr && Math.abs(tr.left - want.left) < 1.5 && Math.abs(tr.top - want.top) < 1.5 && Number.isInteger(made.transform.x) && Number.isInteger(made.transform.y), { got: tr && [tr.left, tr.top], want, x: made.transform.x, y: made.transform.y });
     app.setText({ text: "" });
     app.endTextEdit(true);
     check("empty text is discarded", app.doc!.layers.length === n - 1, app.doc!.layers.map((l) => l.name));
