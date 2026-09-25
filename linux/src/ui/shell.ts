@@ -775,7 +775,10 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     for (const t of TOOL_META) {
       const b = document.createElement("button");
       b.title = t.title;
-      b.innerHTML = icon(t.id === "brush" && app.session.brushMode === "erase" ? "eraser" : t.icon, 20);
+      const variant: IconName = t.id === "brush" && app.session.brushMode === "erase" ? "eraser"
+        : t.id === "marquee" && app.session.marqueeShape === "ellipse" ? "marquee-ellipse"
+        : t.id === "lasso" && app.session.lassoMode === "polygon" ? "lasso-polygon" : t.icon;
+      b.innerHTML = icon(variant, 20);
       b.dataset.key = t.key.toUpperCase();
       b.classList.toggle("active", app.session.tool === t.id);
       b.addEventListener("click", () => app.setTool(t.id));

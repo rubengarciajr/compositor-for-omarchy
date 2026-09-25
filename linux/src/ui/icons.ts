@@ -7,6 +7,8 @@ const PATHS: Record<string, string> = {
   pointer: '<path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/>',
   move: '<path d="M5 9 2 12l3 3"/><path d="m9 5 3-3 3 3"/><path d="m15 19-3 3-3-3"/><path d="m19 9 3 3-3 3"/><path d="M2 12h20"/><path d="M12 2v20"/>',
   marquee: '<path d="M5 3a2 2 0 0 0-2 2"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 19a2 2 0 0 1-2 2"/><path d="M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1.5"/><path d="M13.5 3H15"/><path d="M9 21h1.5"/><path d="M13.5 21H15"/><path d="M3 9v1.5"/><path d="M3 13.5V15"/><path d="M21 9v1.5"/><path d="M21 13.5V15"/>',
+  "marquee-ellipse": '<path d="M12 3a9 9 0 0 1 6.4 2.6"/><path d="M20.4 8.5A9 9 0 0 1 21 12a9 9 0 0 1-.6 3.5"/><path d="M18.4 18.4A9 9 0 0 1 12 21"/><path d="M8.5 20.4A9 9 0 0 1 3.6 15.5"/><path d="M3 12a9 9 0 0 1 .6-3.5"/><path d="M5.6 5.6A9 9 0 0 1 8.5 3.6"/>',
+  "lasso-polygon": '<path d="M4 9 12 3l8 6-3 10H7Z"/><circle cx="4" cy="9" r="1.6" fill="currentColor"/><circle cx="12" cy="3" r="1.6" fill="currentColor"/><circle cx="20" cy="9" r="1.6" fill="currentColor"/>',
   lasso: '<path d="M7 22a5 5 0 0 1-2-4"/><path d="M3.3 14A6.8 6.8 0 0 1 2 10c0-4.4 4.5-8 10-8s10 3.6 10 8-4.5 8-10 8a12 12 0 0 1-5-1"/><circle cx="5" cy="16" r="2"/>',
   wand: '<path d="m21.6 3.6-1.2-1.2a1.2 1.2 0 0 0-1.7 0L2.4 18.6a1.2 1.2 0 0 0 0 1.7l1.3 1.3a1.2 1.2 0 0 0 1.7 0L21.6 5.4a1.2 1.2 0 0 0 0-1.7Z"/><path d="m14 7 3 3"/><path d="M5 6v4"/><path d="M19 14v4"/><path d="M10 2v2"/><path d="M7 8H3"/><path d="M21 16h-4"/><path d="M11 3H9"/>',
   crop: '<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>',
