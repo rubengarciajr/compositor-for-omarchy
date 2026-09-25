@@ -175,7 +175,7 @@ That installs:
 
 ## Keyboard shortcuts
 
-Tools follow Photoshop: `V M L W C B E S R G U T I H Z`, `X` swaps foreground/background, `D` resets them to black/white, `[` / `]` brush size, `Shift+[` / `]` hardness, `1`–`0` opacity, Tab cycles a tool's mode, right-drag resizes the tip, arrows nudge (Shift for ×10), `Backspace` clears, `Alt+Backspace` fills with the foreground colour. Paint tools show a circle the size of the brush instead of an arrow.
+Tools follow Compositor and Photoshop: `V M L W C B E J S R G U T I H Z` (`A` for no tool), `X` swaps foreground/background, `D` resets them to black/white, `[` / `]` brush size, `Shift+[` / `]` hardness, `1`–`0` opacity, Tab cycles a tool's mode, right-drag resizes the tip, arrows nudge (Shift for ×10, `Ctrl` moves the selected pixels), `Backspace` clears the selection, `Alt+Backspace` / `Ctrl+Backspace` fill with the foreground / background colour, `Ctrl+T` transforms the layer or selection, `Ctrl+H` hides the transform controls, `Ctrl+[` / `Ctrl+]` reorder layers, `Ctrl+=` / `Ctrl+-` zoom. Paint tools show a circle the size of the brush instead of an arrow.
 
 | Action | Linux | macOS label |
 | --- | --- | --- |

@@ -117,14 +117,15 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     flattenDocument(app.doc!);
     check("scaled text rasterizes at its displayed size", Math.abs(layer.canvas!.width - tr.width) <= 1 && Math.abs(tr.width - after * 2) <= 1, { bitmap: layer.canvas!.width, transform: tr.width, expected: after * 2 });
     (app as unknown as { bakeTextScale(): void }).bakeTextScale();
-    check("uniform scale becomes font size", layer.text!.fontSize === size0 * 2 && Math.abs(layer.transform.width - after * 2) <= 2, { fontSize: layer.text!.fontSize, width: layer.transform.width });
+    check("uniform scale becomes font size", layer.text!.fontSize === size0 * 2 && Math.abs(layer.transform.width - after * 2) <= 40, { fontSize: layer.text!.fontSize, width: layer.transform.width });
     app.setText({ text: "Short" });
     flattenDocument(app.doc!);
     check("editing scaled text keeps its size", layer.text!.fontSize === size0 * 2 && layer.transform.width < after * 2, { fontSize: layer.text!.fontSize, width: layer.transform.width });
   }
-  // Gradient tool creates its own layer and fills it along the drag; brush on a group makes a layer.
+  // Gradient tool fills the active layer along the drag as a pending edit (Compositor 1.3); a folder cannot be painted.
   {
     app.newDocument(100, 50, "gradient");
+    app.addBlankLayer();
     app.session.foreground = "#ff0000";
     app.session.background = "#0000ff";
     app.setTool("gradient");
@@ -143,11 +144,12 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const doc = app.doc!;
     const f = flattenDocument(doc);
     const left = px(f, 2, 25), right = px(f, 97, 25);
-    check("gradient makes a new layer", doc.layers.length === before + 1 && app.activeLayer?.name.startsWith("Gradient") === true, doc.layers.map((l) => l.name));
+    check("gradient fills the active layer as a pending edit", doc.layers.length === before && !!app.gradientEdit && app.gradientHasLine(), { layers: doc.layers.map((l) => l.name), pending: !!app.gradientEdit });
     check("gradient spans the layer", left[0] > 200 && left[2] < 60 && right[2] > 200 && right[0] < 60, { left, right });
     // Presets: foreground→transparent fades out, reverse flips, radial spreads from the start point,
     // and the choice is remembered in localStorage.
     const drag = (x1: number, x2: number) => {
+      app.cancelGradient(); // a fresh edit: pressing on the old line's end would grab its handle
       app.pointerDown(view, fakeDown(ox + x1 * z, oy + 25 * z));
       app.pointerMove(view, fakeDown(ox + x2 * z, oy + 25 * z));
       app.pointerUp(view, fakeDown(ox + x2 * z, oy + 25 * z));
@@ -316,10 +318,11 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.session.foreground = "#000000";
     click(50, 30, { alt: true });
     check("alt-click with the brush samples a colour", app.session.foreground === "#ff0000", app.session.foreground);
-    // Eyedropper: Alt sets the background
+    // Eyedropper always writes the foreground (Compositor has no Option-to-background).
     app.setTool("eyedropper");
+    const bgBefore = app.session.background;
     click(50, 5, { alt: true });
-    check("alt-click eyedropper sets the background", app.session.background === "#ffffff" && app.session.foreground === "#ff0000", { fg: app.session.foreground, bg: app.session.background });
+    check("eyedropper samples into the foreground", app.session.foreground === "#ffffff" && app.session.background === bgBefore, { fg: app.session.foreground, bg: app.session.background });
     // Zoom: Alt zooms out
     app.setTool("zoom");
     const z0 = app.session.zoom;
@@ -482,10 +485,10 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.setTool("crop");
     const fromSel = { ...app.session.cropRect! };
     app.session.cropRect = null; app.deselect();
-    app.session.cropRatio = 1;
-    app.pointerDown(view, ev(10, 10)); app.pointerMove(view, ev(50, 20)); app.pointerUp(view, ev(50, 20));
+    app.session.cropRatioChoice = "1:1";
+    app.pointerDown(view, ev(15, 15)); app.pointerMove(view, ev(55, 25)); app.pointerUp(view, ev(55, 25));
     const square = { ...app.session.cropRect! };
-    app.session.cropRatio = null; app.session.cropRect = null;
+    app.session.cropRatioChoice = "Free"; app.session.cropRect = null;
     check("crop starts at the selection and keeps the ratio", fromSel.x === 5 && fromSel.y === 5 && fromSel.w === 20 && fromSel.h === 10 && Math.round(square.w) === 40 && Math.round(square.h) === 40, { fromSel, square });
     // Scrubby label: dragging "Size" changes the brush size.
     app.setTool("brush");
@@ -586,26 +589,29 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.newDocument(40, 30, "ants");
     app.setTool("marquee");
     const view = document.getElementById("editor") as HTMLCanvasElement;
-    const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean } = {}) => {
+    const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
       const rect = view.getBoundingClientRect();
       const z = app.session.zoom;
       const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
       const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
-      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: false, metaKey: false } as unknown as PointerEvent;
+      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
     };
     app.pointerDown(view, ev(10, 10)); app.pointerMove(view, ev(20, 20)); app.pointerUp(view, ev(20, 20));
     const outline = selectionOutline(app.doc!.selection!.mask!);
     check("selection outline for the marching ants", outline.length === 40 * 4, { segments: outline.length / 4 });
     app.deselect();
     // Crop box: handles resize it, dragging inside moves it
+    app.newDocument(120, 90, "cropbox"); // room for a frame whose inside is more than 10 px from every edge
     app.setTool("crop");
-    app.pointerDown(view, ev(5, 5)); app.pointerMove(view, ev(25, 20)); app.pointerUp(view, ev(25, 20));
+    const frame = { ...app.session.cropRect! };
+    const noSnap = { ctrl: true }; // Control bypasses snapping
+    app.pointerDown(view, ev(30, 25, noSnap)); app.pointerMove(view, ev(70, 55, noSnap)); app.pointerUp(view, ev(70, 55, noSnap)); // inside the full-canvas frame: a new frame
     const drawn = { ...app.session.cropRect! };
-    app.pointerDown(view, ev(25, 20)); app.pointerMove(view, ev(35, 28)); app.pointerUp(view, ev(35, 28)); // se handle
+    app.pointerDown(view, ev(70, 55, noSnap)); app.pointerMove(view, ev(85, 63, noSnap)); app.pointerUp(view, ev(85, 63, noSnap)); // se corner
     const resized = { ...app.session.cropRect! };
-    app.pointerDown(view, ev(15, 14)); app.pointerMove(view, ev(17, 15)); app.pointerUp(view, ev(17, 15)); // inside
+    app.pointerDown(view, ev(50, 40, noSnap)); app.pointerMove(view, ev(52, 41, noSnap)); app.pointerUp(view, ev(52, 41, noSnap)); // inside
     const moved = { ...app.session.cropRect! };
-    check("crop handles resize the box and dragging inside moves it", Math.round(drawn.w) === 20 && Math.round(resized.w) === 30 && Math.round(resized.h) === 23 && Math.round(moved.x) === 7 && Math.round(moved.y) === 6 && Math.round(moved.w) === 30, { drawn, resized, moved });
+    check("crop starts as the whole canvas, then handles resize and dragging inside moves", frame.w === 120 && drawn.w === 40 && drawn.h === 30 && resized.w === 55 && resized.h === 38 && moved.x === 32 && moved.y === 26 && moved.w === 55, { frame, drawn, resized, moved });
     app.session.cropRect = null;
     // The stroke engine: opacity caps the whole stroke, Esc restores the layer, paint grows the bitmap.
     app.addBlankLayer();
@@ -625,7 +631,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     small.canvas = createCanvas(10, 10); small.transform = { x: 20, y: 5, width: 10, height: 10, rotation: 0, flipH: false, flipV: false };
     app.pointerDown(view, ev(30, 20)); app.pointerMove(view, ev(36, 20)); app.pointerUp(view, ev(36, 20));
     const grown = app.activeLayer!;
-    check("painting outside a layer grows it to the paint", grown.canvas!.width > 10 && Math.round(grown.transform.x + grown.transform.width) === 40 && grown.transform.y + grown.transform.height >= 26 && px(flattenDocument(app.doc!), 33, 20)[0] === 255 && px(flattenDocument(app.doc!), 33, 20)[3] === 255, { w: grown.canvas!.width, t: grown.transform, flat: px(flattenDocument(app.doc!), 33, 20) });
+    check("painting outside a layer grows it to the paint", grown.canvas!.width > 10 && Math.round(grown.transform.x + grown.transform.width) === 42 && grown.transform.y + grown.transform.height >= 26 && px(flattenDocument(app.doc!), 33, 20)[0] === 255 && px(flattenDocument(app.doc!), 33, 20)[3] === 255, { w: grown.canvas!.width, t: grown.transform, flat: px(flattenDocument(app.doc!), 33, 20) });
   }
   // History is copy-on-write: unchanged bitmaps are shared between entries, edits never
   // reach into an entry, and brush strokes composite incrementally around the painted layer.
@@ -1073,6 +1079,83 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     app.cancelTransform();
     check("Esc cancels a floating transform exactly", !app.doc!.layers.some((l) => l.name === "Floating Selection") && px(flattenDocument(app.doc!), 150, 130)[0] === 0, order());
     app.deselect();
+  }
+  // Crop, Gradient, Shape, Type, Eyedropper and Zoom follow Compositor 1.3.
+  {
+    app.newDocument(200, 150, "tools");
+    const view = document.getElementById("editor") as HTMLCanvasElement;
+    const ev = (x: number, y: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
+      const rect = view.getBoundingClientRect();
+      const z = app.session.zoom;
+      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
+      const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: !!m.alt, shiftKey: !!m.shift, ctrlKey: !!m.ctrl, metaKey: false } as unknown as PointerEvent;
+    };
+    const drag = (x0: number, y0: number, x1: number, y1: number, m: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {}) => {
+      app.pointerDown(view, ev(x0, y0, m)); app.pointerMove(view, ev((x0 + x1) / 2, (y0 + y1) / 2, m)); app.pointerMove(view, ev(x1, y1, m)); app.pointerUp(view, ev(x1, y1, m));
+    };
+    const hist = (app as unknown as { history: History }).history;
+    // Crop never resamples: layers keep their pixels and shift; the canvas can grow past its old edge.
+    const bg = app.activeLayer!;
+    app.setTool("crop");
+    app.session.cropRect = { x: 50, y: 40, w: 180, h: 100 }; // extends 30 px past the right edge
+    app.applyCrop();
+    check("crop offsets layers without resampling and can extend the canvas", app.doc!.width === 180 && app.doc!.height === 100 && bg.transform.x === -50 && bg.transform.y === -40 && bg.canvas!.width === 200 && px(flattenDocument(app.doc!), 170, 50)[3] === 0, { size: [app.doc!.width, app.doc!.height], t: bg.transform });
+    app.undo();
+    // Gradient: a pending edit with draggable ends; Esc restores, Return applies, ⌘Z first discards.
+    app.addBlankLayer();
+    app.session.foreground = "#ff0000"; app.session.background = "#0000ff";
+    app.setTool("gradient");
+    app.setGradient({ preset: "fg-bg", style: "linear", reverse: false, opacity: 1 });
+    const steps = hist.entries().stack.length;
+    drag(20, 75, 180, 75);
+    const pending = !!app.gradientEdit;
+    drag(180, 75, 100, 75); // grab the end handle and pull it back
+    const endMoved = app.gradientEdit?.end.x;
+    check("gradient ends are draggable", pending && endMoved === 100 && px(app.activeLayer!.canvas!, 150, 75)[2] === 255, { pending, endMoved, at150: px(app.activeLayer!.canvas!, 150, 75) });
+    app.undo();
+    check("the first undo discards a pending gradient", !app.gradientEdit && hist.entries().stack.length === steps && px(app.activeLayer!.canvas!, 100, 75)[3] === 0, { steps: hist.entries().stack.length });
+    drag(20, 75, 180, 75, { shift: true }); // Shift: 45° steps (here horizontal)
+    app.commitGradient();
+    check("Return applies the gradient as one step", !app.gradientEdit && hist.entries().stack.length === steps + 1 && px(app.activeLayer!.canvas!, 30, 75)[0] > 200 && px(app.activeLayer!.canvas!, 170, 75)[2] > 200, { steps: hist.entries().stack.length });
+    // Shape: a line is stroked between its endpoints with round caps; the selection survives.
+    app.setTool("marquee");
+    drag(10, 10, 40, 40);
+    app.setTool("shape");
+    app.session.shapeKind = "line"; app.session.shapeLineWidth = 6;
+    drag(50, 50, 150, 120);
+    const line = app.activeLayer!;
+    check("shape lines are stroked between their ends and keep the selection", line.name === "Line 1" && line.shape?.kind === "line" && !!line.shape.line && line.transform.width === 106 && !!app.doc!.selection && px(flattenDocument(app.doc!), 100, 85)[0] === 255, { name: line.name, t: line.transform, shape: line.shape });
+    app.session.shapeKind = "rect"; app.session.shapeCornerRadius = 10;
+    drag(20, 100, 60, 140, { shift: true, alt: true }); // square from the centre
+    const rect = app.activeLayer!;
+    check("Shift + Option draw a square from the centre with the corner radius", rect.name === "Rectangle 1" && rect.transform.width === 80 && rect.transform.height === 80 && rect.transform.x === -20 && rect.shape?.radius === 10, { t: rect.transform, r: rect.shape?.radius });
+    app.deselect();
+    // Type: a click puts the first baseline on the pointer; a drag makes a wrapping box; names follow the content.
+    app.setTool("type");
+    app.session.text.fontSize = 24;
+    app.pointerDown(view, ev(60, 60)); app.pointerUp(view, ev(60, 60));
+    app.setText({ text: "Hello there world" });
+    app.endTextEdit(true);
+    const point = app.activeLayer!;
+    check("point text sits its baseline on the click and is named after its content", point.name === "Hello there world" && point.transform.x === 48 && point.transform.y < 60 && point.transform.y > 20 && !point.text?.boxWidth, { name: point.name, t: point.transform });
+    drag(10, 10, 90, 90);
+    app.setText({ text: "one two three four five six seven" });
+    app.endTextEdit(true);
+    const boxed = app.activeLayer!;
+    check("dragging draws a text box that wraps", boxed.text?.boxWidth === 80 && boxed.transform.width === 80 && boxed.transform.height === 80 && boxed.text.text.includes("seven"), { t: boxed.transform, box: [boxed.text?.boxWidth, boxed.text?.boxHeight] });
+    app.fillActive("#00ff00");
+    check("fill on type recolours it and keeps it editable", boxed.kind === "text" && boxed.text?.color === "#00ff00", { kind: boxed.kind, color: boxed.text?.color });
+    // Zoom: click doubles, Option-click halves, about the click.
+    app.setTool("zoom");
+    const z0 = app.session.zoom;
+    app.pointerDown(view, ev(100, 75)); app.pointerUp(view, ev(100, 75));
+    const zIn = app.session.zoom;
+    app.pointerDown(view, ev(100, 75, { alt: true })); app.pointerUp(view, ev(100, 75, { alt: true }));
+    check("zoom click doubles and Option-click halves", Math.abs(zIn - z0 * 2) < 1e-9 && Math.abs(app.session.zoom - z0) < 1e-9, { z0, zIn, back: app.session.zoom });
+    app.zoomKeyboard(view, 1);
+    check("keyboard zoom steps through Compositor's levels", [1.25, 1.5, 2, 3, 4].includes(app.session.zoom) || app.session.zoom > z0, app.session.zoom);
+    app.fit(view);
   }
   // Cursors and brush keys.
   {

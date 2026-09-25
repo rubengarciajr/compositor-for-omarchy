@@ -710,7 +710,8 @@ export function textNaturalSize(layer: Layer): { w: number; h: number } {
   const t = layer.text!;
   const ctx = (layer.canvas ?? createCanvas(1, 1)).getContext("2d")!;
   ctx.font = cssFont(t);
-  const lines = t.text.split("\n");
+  if (t.boxWidth && t.boxHeight) return { w: Math.max(16, Math.round(t.boxWidth)), h: Math.max(16, Math.round(t.boxHeight)) }; // a fixed box keeps its size
+  const lines = textLines(ctx, t);
   let maxW = 1;
   for (const line of lines) {
     const chars = [...line];
@@ -720,13 +721,33 @@ export function textNaturalSize(layer: Layer): { w: number; h: number } {
     maxW = Math.max(maxW, w);
   }
   const pad = textPad(t);
-  // The last line needs only its em height, not a full leading, so the box hugs the glyphs.
-  return { w: Math.ceil(maxW + pad * 2), h: Math.ceil((lines.length - 1) * t.fontSize * t.lineHeight + t.fontSize + pad * 2) };
+  // Compositor: the measured width plus a caret's worth (10 % of the size), at least one line tall.
+  return { w: Math.max(16, Math.ceil(maxW + pad * 2 + t.fontSize * 0.1)), h: Math.max(16, Math.ceil(Math.max(1, lines.length) * t.fontSize * t.lineHeight + pad * 2)) };
 }
 
-/** Breathing room around the glyphs (overhangs, italics) in natural units. */
-export function textPad(t: { fontSize: number }): number {
-  return Math.ceil(t.fontSize * 0.1);
+/** Gap between the text and its box, as Compositor's LayerTextStyle.padding (12 layer px). */
+export function textPad(_t: { fontSize: number }): number {
+  return 12;
+}
+
+/** The lines a text layer draws: hard breaks, plus word wrapping inside a fixed box. */
+export function textLines(ctx: CanvasRenderingContext2D, t: { text: string; letterSpacing: number; boxWidth?: number; fontSize: number }): string[] {
+  const raw = t.text.split("\n");
+  if (!t.boxWidth) return raw;
+  const inner = Math.max(1, t.boxWidth - textPad(t) * 2);
+  const width = (str: string) => (t.letterSpacing ? [...str].reduce((a, ch) => a + ctx.measureText(ch).width + t.letterSpacing, 0) : ctx.measureText(str).width);
+  const out: string[] = [];
+  for (const para of raw) {
+    const words = para.split(" ");
+    let line = "";
+    for (const w of words) {
+      const candidate = line ? `${line} ${w}` : w;
+      if (width(candidate) <= inner || !line) line = candidate;
+      else { out.push(line); line = w; }
+    }
+    out.push(line);
+  }
+  return out;
 }
 
 /** How much the transform stretches a text layer beyond its font size (1 = unscaled). */
@@ -781,7 +802,7 @@ export function drawTextLayer(layer: Layer): void {
   ctx.font = cssFont(t);
   ctx.textAlign = t.align;
   ctx.textBaseline = "top";
-  const lines = t.text.split("\n");
+  const lines = textLines(ctx, t);
   const lineH = t.fontSize * t.lineHeight;
   const inner = natural.w - pad * 2;
   const x = t.align === "center" ? inner / 2 : t.align === "right" ? inner : 0;
@@ -819,14 +840,20 @@ export function drawShapeLayer(layer: Layer): void {
   if (s.kind === "ellipse") {
     ctx.ellipse(w / 2, h / 2, w / 2, h / 2, 0, 0, Math.PI * 2);
   } else if (s.kind === "line") {
-    ctx.moveTo(0, h / 2);
-    ctx.lineTo(w, h / 2);
+    const l = s.line ?? { x0: 0, y0: 0.5, x1: 1, y1: 0.5 };
+    ctx.lineCap = "round";
+    ctx.lineWidth = Math.max(1, s.strokeWidth);
+    ctx.strokeStyle = s.stroke;
+    ctx.moveTo(l.x0 * w, l.y0 * h);
+    ctx.lineTo(l.x1 * w, l.y1 * h);
+    ctx.stroke();
+    return;
   } else if (s.kind === "rounded") {
     const r = Math.min(s.radius, w / 2, h / 2);
     ctx.roundRect(0, 0, w, h, r);
   } else {
     ctx.rect(0, 0, w, h);
   }
-  if (s.kind !== "line") ctx.fill();
+  ctx.fill();
   if (s.strokeWidth > 0) ctx.stroke();
 }

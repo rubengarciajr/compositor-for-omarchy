@@ -442,7 +442,7 @@ export function screenToDoc(
 }
 
 export function fitZoom(doc: DocumentState, view: HTMLCanvasElement): number {
-  const pad = 48;
+  const pad = 96; // Compositor's fit leaves 96 points of margin in all
   const w = view.clientWidth || view.parentElement?.clientWidth || 800;
   const h = view.clientHeight || view.parentElement?.clientHeight || 600;
   const zx = (w - pad) / doc.width;

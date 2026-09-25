@@ -69,6 +69,7 @@ import {
 import { BrushStroke, WarpStroke, layerInDocument, resizeLayerBitmap, docToLayer, drawLayerInDocument } from "./stroke";
 import { selectionOutline } from "../render/ants";
 import type { StrokeMode, StrokeOptions, StrokeTip } from "./stroke";
+import type { ShapeKind } from "./model";
 import { spotHeal } from "./heal";
 import { flattenDocument, flattenDocumentCopy, fitZoom, screenToDoc, ensureLayerBitmap, setEditingLayer, beginStroke, endStroke } from "../render/compositor";
 import { toLocal } from "./transform";
@@ -122,7 +123,13 @@ export class App {
   /** Dragging the selected pixels (⌘-drag inside the selection) on a temporary floating layer. */
   private pixelMove: { sourceId: string; floatingId: string; sourceBefore: HTMLCanvasElement; originMask: HTMLCanvasElement; originOutline: HTMLCanvasElement | null; base: { x: number; y: number }; start: { x: number; y: number }; offset: { x: number; y: number }; duplicate: boolean } | null = null;
   private lassoPoints: [number, number][] = [];
-  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "tip" | "scale" | "rotate" | "select-move" | "pixel-move" = "none";
+  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "tip" | "scale" | "rotate" | "select-move" | "pixel-move" | "zoom" | "gradient" | "gradient-end" | "sample" | "text-box" = "none";
+  /** Gradient tool: the pending fill (Cancel / Apply, Esc / Return), re-rendered as its settings change. */
+  gradientEdit: { layerId: string; mask: boolean; base: HTMLCanvasElement; start: { x: number; y: number }; end: { x: number; y: number } } | null = null;
+  private gradientGrab: "start" | "end" | null = null;
+  private zoomDrag: { start: { clientX: number; clientY: number }; zoom: number; moved: boolean } | null = null;
+  private cropSnapTargets: { axis: "x" | "y"; pos: number }[] = [];
+  private textBoxAnchor: { x: number; y: number } | null = null;
   private moveStart: { x: number; y: number } | null = null;
   private transformStart: Transform | null = null;
   private transformHandle: HandleSpec | null = null;
@@ -156,6 +163,12 @@ export class App {
       showTransformControls: readToolDefault("transformControls", true),
       locksTransformRatio: true,
       snapLines: [],
+      shapeLineWidth: 4,
+      shapeCornerRadius: 0,
+      showsSampleRing: true,
+      sampleRing: null,
+      cropRatioChoice: "Free",
+      shapeDraft: null,
       foreground: "#000000",
       background: "#ffffff",
       marqueeShape: "rect",
@@ -181,18 +194,17 @@ export class App {
       showPixelGrid: true,
       snap: { guides: true, grid: false, layers: true, bounds: true },
       text: {
-        text: "Type here",
+        text: "Text",
         fontFamily: "Noto Sans",
-        fontSize: 48,
-        color: "#c0caf5",
+        fontSize: 72,
+        color: "#000000",
         align: "left",
-        lineHeight: 1.25,
+        lineHeight: 1.2, // Compositor's Auto leading: 120 % of the size
         letterSpacing: 0,
-        weight: 500,
+        weight: 400,
       },
       gradient: loadGradientSettings(),
       cropRect: null,
-      cropRatio: null,
       dragLine: null,
       hover: null,
       textEdit: null,
@@ -708,6 +720,7 @@ export class App {
   selectLayer(id: string, opts: { toggle?: boolean; range?: boolean; mask?: boolean } = {}): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.gradientEdit && (id !== this.session.activeLayerId || !!opts.mask !== this.session.maskSelected)) this.commitGradient();
     if (id !== this.session.activeLayerId || !opts.mask) this.session.maskSelected = false;
     if (opts.mask) this.session.maskSelected = true;
     const sel = new Set(this.session.selectedLayerIds);
@@ -960,11 +973,15 @@ export class App {
     }
     if (before !== tool) this.cancelLasso(); // switching tools drops an outline in progress
     if (before !== tool && this.transformEdit) this.commitTransform(); // and applies a pending transform
+    if (before !== tool && this.gradientEdit) this.commitGradient(); // a pending gradient is applied, as Photoshop does
+    if (before !== tool && tool !== "shape") this.cancelShape();
+    if (before !== tool && tool !== "crop") this.session.cropRect = null;
     this.session.tool = tool;
-    if (tool === "crop" && this.doc?.selection?.mask && !this.session.cropRect) {
-      // With a selection, the crop box starts at its bounds (Compositor 1.2.5).
-      const b = maskBounds(this.doc.selection.mask);
-      if (b) this.session.cropRect = { ...b };
+    if (tool === "crop" && this.doc && !this.session.cropRect) {
+      // The frame starts at the selection's bounds, else the whole canvas (Compositor's Crop).
+      this.session.cropRatioChoice = "Free";
+      const b = this.doc.selection?.mask ? maskBounds(this.doc.selection.outline ?? this.doc.selection.mask) : null;
+      this.session.cropRect = b ? { x: Math.max(0, b.x), y: Math.max(0, b.y), w: Math.min(this.doc.width - Math.max(0, b.x), b.w), h: Math.min(this.doc.height - Math.max(0, b.y), b.h) } : { x: 0, y: 0, w: this.doc.width, h: this.doc.height };
     }
     this.emitView();
   }
@@ -1031,6 +1048,7 @@ export class App {
   undo(): void {
     const doc = this.doc;
     if (!doc) return;
+    if (this.gradientEdit) { this.cancelGradient(); return; } // the first ⌘Z discards a pending gradient
     if (this.history.undo(doc)) this.emit();
   }
 
@@ -1043,6 +1061,13 @@ export class App {
   /** Fill the selection (or the whole layer) with a colour; on a mask, black hides and white reveals. */
   fillActive(color = this.session.foreground): void {
     const doc = this.doc;
+    const live = this.activeLayer;
+    if (doc && live?.kind === "text" && live.text && !doc.selection && !this.session.maskSelected) {
+      // Fill on type recolours the glyphs and keeps the layer editable (Compositor's recolorText).
+      this.setText({ color });
+      this.commit("Fill Text");
+      return;
+    }
     const target = this.paintTarget();
     if (!doc || !target) return;
     const { layer, mask } = target;
@@ -1340,7 +1365,7 @@ export class App {
       writableLayer(layer);
       fitTextLayer(layer);
       if (edit.created) doc.layers = doc.layers.filter((l) => l !== layer);
-      this.history.undo(doc); // drop the "Add type layer" step
+      this.history.undo(doc); // drop the "New Text Layer" step
       this.history.redo(doc);
       if (edit.created) { this.session.activeLayerId = doc.layers[doc.layers.length - 1]?.id ?? null; this.session.selectedLayerIds = this.session.activeLayerId ? [this.session.activeLayerId] : []; }
       this.emit();
@@ -1353,16 +1378,42 @@ export class App {
       this.commit("Discard empty text");
       return;
     }
-    if (layer.text.text !== edit.original || edit.created) this.commit("Edit text");
+    if (layer.text.text !== edit.original || edit.created) {
+      if (edit.created || layer.name === App.textLayerName(edit.original)) layer.name = App.textLayerName(layer.text.text);
+      this.session.text = { ...layer.text, text: this.session.text.text, boxWidth: undefined, boxHeight: undefined }; // styles are sticky for the next text
+      this.commit(edit.created ? "New Text Layer" : "Edit Text");
+    }
     else this.emit();
   }
 
-  addTextLayer(x: number, y: number, text = this.session.text.text): void {
+  /** Point text: the click puts the first baseline on the pointer (Compositor's beginText). */
+  private beginPointText(p: { x: number; y: number }): void {
+    const t = this.session.text;
+    const pad = 12;
+    const descent = t.fontSize * 0.22; // the font's descender, close enough for every family we ship
+    const baseline = pad + t.fontSize * t.lineHeight - descent;
+    this.addTextLayer(p.x - pad, p.y - baseline, "");
+    this.beginTextEdit(this.session.activeLayerId!, true);
+  }
+
+  /** Box text: words wrap inside the dragged rectangle (at least 16 × 16). */
+  private beginTextBox(r: { x: number; y: number; w: number; h: number }): void {
+    this.addTextLayer(r.x, r.y, "", { boxWidth: Math.max(16, Math.round(r.w)), boxHeight: Math.max(16, Math.round(r.h)) });
+    this.beginTextEdit(this.session.activeLayerId!, true);
+  }
+
+  /** Layer name from the content: whitespace collapsed, 40 characters, "Text" when empty. */
+  static textLayerName(content: string): string {
+    const name = content.replace(/\s+/g, " ").trim().slice(0, 40);
+    return name || "Text";
+  }
+
+  addTextLayer(x: number, y: number, text = this.session.text.text, box: { boxWidth: number; boxHeight: number } | null = null): void {
     const doc = this.doc;
     if (!doc) return;
-    const data: TextLayerData = { ...this.session.text, text };
+    const data: TextLayerData = { ...this.session.text, text, color: this.session.foreground, ...(box ?? {}) };
     const layer = createLayer({
-      name: "Type",
+      name: App.textLayerName(text),
       kind: "text",
       text: data,
       canvas: createCanvas(1, 1),
@@ -1372,7 +1423,7 @@ export class App {
     doc.layers.push(layer);
     this.session.activeLayerId = layer.id;
     this.session.selectedLayerIds = [layer.id];
-    this.commit("Add type layer");
+    this.commit("New Text Layer");
   }
 
   /** Edit the active shape layer (fill, stroke, width, corner radius); the raster follows. */
@@ -1383,51 +1434,188 @@ export class App {
     this.redraw();
   }
 
-  addShapeLayer(x: number, y: number, w: number, h: number): void {
-    const doc = this.doc;
-    if (!doc) return;
-    const canvas = createCanvas(Math.max(1, w), Math.max(1, h));
-    const layer = createLayer({
-      name: this.session.shapeKind,
-      kind: "shape",
-      shape: {
-        kind: this.session.shapeKind,
-        fill: this.session.foreground,
-        stroke: this.session.background,
-        strokeWidth: 0,
-        radius: 12,
-      },
-      canvas,
-      transform: defaultTransform(Math.max(1, w), Math.max(1, h), x, y),
-    });
-    drawShapeLayer(layer);
-    doc.layers.push(layer);
-    this.session.activeLayerId = layer.id;
-    this.commit("Add shape");
+  /** Esc while drawing a shape: nothing is added. */
+  cancelShape(): void {
+    if (this.dragMode === "marquee" && this.session.tool === "shape") this.dragMode = "none";
+    if (this.session.shapeDraft) { this.session.shapeDraft = null; this.overlay(); }
   }
 
+  /** The dragged shape becomes a new layer above the active one; the selection is kept. */
+  private finishShape(): void {
+    const doc = this.doc;
+    const d = this.session.shapeDraft;
+    this.session.shapeDraft = null;
+    if (!doc || !d) return;
+    let { x, y, w, h } = d;
+    let line: ShapeLayerData["line"] | undefined;
+    if (d.kind === "line" && d.line) {
+      // A line's box is the endpoints' box inset by half the thickness, so the round caps fit.
+      const half = this.session.shapeLineWidth / 2;
+      x = Math.min(d.line.x0, d.line.x1) - half; y = Math.min(d.line.y0, d.line.y1) - half;
+      w = Math.abs(d.line.x1 - d.line.x0) + half * 2; h = Math.abs(d.line.y1 - d.line.y0) + half * 2;
+      line = { x0: (d.line.x0 - x) / w, y0: (d.line.y0 - y) / h, x1: (d.line.x1 - x) / w, y1: (d.line.y1 - y) / h };
+    }
+    if (w < 1 || h < 1) { this.overlay(); return; } // a click without a drag makes nothing
+    const kind = d.kind === "rect" && this.session.shapeCornerRadius > 0 ? "rounded" : d.kind;
+    const base = d.kind === "rect" ? "Rectangle" : d.kind === "ellipse" ? "Ellipse" : "Line";
+    let n = 1;
+    while (doc.layers.some((l) => l.name === `${base} ${n}`)) n++;
+    this.addShapeLayer(x, y, w, h, { kind, name: `${base} ${n}`, line, radius: this.session.shapeCornerRadius, lineWidth: this.session.shapeLineWidth });
+  }
+
+  addShapeLayer(x: number, y: number, w: number, h: number, opts: { kind?: ShapeKind; name?: string; line?: ShapeLayerData["line"]; radius?: number; lineWidth?: number } = {}): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const kind = opts.kind ?? this.session.shapeKind;
+    const canvas = createCanvas(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)));
+    const layer = createLayer({
+      name: opts.name ?? (kind === "ellipse" ? "Ellipse" : kind === "line" ? "Line" : "Rectangle"),
+      kind: "shape",
+      shape: {
+        kind,
+        fill: this.session.foreground,
+        stroke: kind === "line" ? this.session.foreground : this.session.background,
+        strokeWidth: kind === "line" ? (opts.lineWidth ?? this.session.shapeLineWidth) : 0,
+        radius: opts.radius ?? this.session.shapeCornerRadius,
+        line: opts.line,
+      },
+      canvas,
+      transform: defaultTransform(Math.max(1, Math.round(w)), Math.max(1, Math.round(h)), Math.round(x), Math.round(y)),
+    });
+    drawShapeLayer(layer);
+    this.insertLayerAboveActive(layer);
+    this.commit(kind === "ellipse" ? "Ellipse" : kind === "line" ? "Line" : "Rectangle");
+  }
+
+  /** Crop never resamples: the canvas takes the frame's size and every layer's origin shifts. */
   applyCrop(): void {
     const doc = this.doc;
     const r = this.session.cropRect;
     if (!doc || !r) return;
-    const nw = Math.max(1, Math.round(r.w));
-    const nh = Math.max(1, Math.round(r.h));
+    const snapped = this.snapCropRect(r);
+    const nw = Math.max(1, snapped.w), nh = Math.max(1, snapped.h);
     for (const layer of doc.layers) {
-      if (!layer.canvas) continue;
-      const c = createCanvas(nw, nh);
-      c.getContext("2d")!.drawImage(
-        layer.canvas,
-        -r.x + layer.transform.x,
-        -r.y + layer.transform.y,
-      );
-      layer.canvas = c;
-      layer.transform = defaultTransform(nw, nh, 0, 0);
+      layer.transform.x -= snapped.x;
+      layer.transform.y -= snapped.y;
+      if (layer.mask) {
+        // Masks live in document space: re-cut them, revealing whatever the frame newly covers.
+        const m = createCanvas(nw, nh);
+        const mctx = m.getContext("2d")!;
+        mctx.fillStyle = "#fff";
+        mctx.fillRect(0, 0, nw, nh);
+        mctx.clearRect(-snapped.x, -snapped.y, doc.width, doc.height);
+        mctx.drawImage(layer.mask.canvas, -snapped.x, -snapped.y);
+        layer.mask = { ...layer.mask, canvas: m };
+      }
     }
     doc.width = nw;
     doc.height = nh;
+    doc.selection = null;
     this.session.cropRect = null;
     this.setTool("move");
     this.commit("Crop");
+  }
+
+  cancelCrop(): void {
+    this.session.cropRect = null;
+    this.emit();
+  }
+
+  /** The frame drawn by the Crop tool: the pending rect, or the whole canvas. */
+  visibleCropRect(): { x: number; y: number; w: number; h: number } | null {
+    const doc = this.doc;
+    if (!doc || this.session.tool !== "crop") return null;
+    return this.session.cropRect ?? { x: 0, y: 0, w: doc.width, h: doc.height };
+  }
+
+  cropRatio(): number | null {
+    const doc = this.doc;
+    switch (this.session.cropRatioChoice) {
+      case "Original": return doc ? doc.width / doc.height : null;
+      case "1:1": return 1;
+      case "4:3": return 4 / 3;
+      case "3:4": return 3 / 4;
+      case "16:9": return 16 / 9;
+      case "9:16": return 9 / 16;
+      default: return null;
+    }
+  }
+
+  /** Ratio picker: keep the frame's left edge and width, fit the height, stay centred vertically. */
+  changeCropRatio(choice: SessionState["cropRatioChoice"]): void {
+    this.session.cropRatioChoice = choice;
+    const ratio = this.cropRatio();
+    const r = this.session.cropRect;
+    if (ratio && r) {
+      const h = r.w / ratio;
+      this.session.cropRect = this.snapCropRect({ x: r.x, y: r.y + r.h / 2 - h / 2, w: r.w, h });
+    }
+    this.emitView();
+  }
+
+  /** Whole pixels, at least 1 × 1 (CropGeometry.snapped). */
+  private snapCropRect(r: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
+    const x0 = Math.min(r.x, r.x + r.w), y0 = Math.min(r.y, r.y + r.h);
+    const x1 = Math.max(r.x, r.x + r.w), y1 = Math.max(r.y, r.y + r.h);
+    const x = Math.round(x0), y = Math.round(y0);
+    return { x, y, w: Math.max(1, Math.round(x1) - x), h: Math.max(1, Math.round(y1) - y) };
+  }
+
+  /** Crop handle regions: 20 px corner squares and 20 px bands along whole edges. */
+  private cropResizeRegion(r: { x: number; y: number; w: number; h: number }, p: { x: number; y: number }): HandleSpec | null {
+    const z = this.session.zoom || 1;
+    const reach = 10 / z;
+    const nearX = p.x >= r.x - reach && p.x <= r.x + r.w + reach, nearY = p.y >= r.y - reach && p.y <= r.y + r.h + reach;
+    const onLeft = Math.abs(p.x - r.x) <= reach, onRight = Math.abs(p.x - (r.x + r.w)) <= reach;
+    const onTop = Math.abs(p.y - r.y) <= reach, onBottom = Math.abs(p.y - (r.y + r.h)) <= reach;
+    if (onLeft && onTop) return { id: "nw", hx: -1, hy: -1 };
+    if (onRight && onTop) return { id: "ne", hx: 1, hy: -1 };
+    if (onRight && onBottom) return { id: "se", hx: 1, hy: 1 };
+    if (onLeft && onBottom) return { id: "sw", hx: -1, hy: 1 };
+    if (onTop && nearX) return { id: "n", hx: 0, hy: -1 };
+    if (onBottom && nearX) return { id: "s", hx: 0, hy: 1 };
+    if (onLeft && nearY) return { id: "w", hx: -1, hy: 0 };
+    if (onRight && nearY) return { id: "e", hx: 1, hy: 0 };
+    return null;
+  }
+
+  /** Crop snap targets: the canvas bounds and every visible pixel layer's rounded box (no centres). */
+  private cropSnapTargetsFor(): { axis: "x" | "y"; pos: number }[] {
+    const doc = this.doc!;
+    const out: { axis: "x" | "y"; pos: number }[] = [{ axis: "x", pos: 0 }, { axis: "x", pos: doc.width }, { axis: "y", pos: 0 }, { axis: "y", pos: doc.height }];
+    for (const l of doc.layers) {
+      if (!l.visible || l.kind === "group" || l.kind === "adjustment" || !l.canvas) continue;
+      const xs = boxCorners(l.transform).map((c) => c.x), ys = boxCorners(l.transform).map((c) => c.y);
+      out.push({ axis: "x", pos: Math.round(Math.min(...xs)) }, { axis: "x", pos: Math.round(Math.max(...xs)) }, { axis: "y", pos: Math.round(Math.min(...ys)) }, { axis: "y", pos: Math.round(Math.max(...ys)) });
+    }
+    return out;
+  }
+
+  private snapValue(axis: "x" | "y", v: number): number | null {
+    const tol = 8 / (this.session.zoom || 1);
+    let best: number | null = null, bestD = tol;
+    for (const t of this.cropSnapTargets) if (t.axis === axis) { const d = Math.abs(t.pos - v); if (d < bestD) { bestD = d; best = t.pos; } }
+    return best;
+  }
+
+  /** Snap the edges being dragged; with `center` (Option) the opposite edge mirrors. */
+  private snapCropEdges(r: { x: number; y: number; w: number; h: number }, edges: { left: boolean; right: boolean; top: boolean; bottom: boolean }, center: { x: number; y: number } | null): { x: number; y: number; w: number; h: number } {
+    let { x, y, w, h } = r;
+    if (edges.left) { const s = this.snapValue("x", x); if (s !== null) { if (center) { const half = center.x - s; x = center.x - half; w = half * 2; } else { w += x - s; x = s; } } }
+    else if (edges.right) { const s = this.snapValue("x", x + w); if (s !== null) { if (center) { const half = s - center.x; x = center.x - half; w = half * 2; } else w = s - x; } }
+    if (edges.top) { const s = this.snapValue("y", y); if (s !== null) { if (center) { const half = center.y - s; y = center.y - half; h = half * 2; } else { h += y - s; y = s; } } }
+    else if (edges.bottom) { const s = this.snapValue("y", y + h); if (s !== null) { if (center) { const half = s - center.y; y = center.y - half; h = half * 2; } else h = s - y; } }
+    return { x, y, w: Math.max(1, w), h: Math.max(1, h) };
+  }
+
+  /** Moving the frame: both edges on each axis are candidates; the smallest shift wins, size kept. */
+  private snapCropMove(r: { x: number; y: number; w: number; h: number }): { x: number; y: number; w: number; h: number } {
+    let dx = 0, dy = 0, bx = 8 / (this.session.zoom || 1), by = bx;
+    for (const t of this.cropSnapTargets) {
+      if (t.axis === "x") for (const v of [r.x, r.x + r.w]) { const d = Math.abs(t.pos - v); if (d < bx) { bx = d; dx = t.pos - v; } }
+      else for (const v of [r.y, r.y + r.h]) { const d = Math.abs(t.pos - v); if (d < by) { by = d; dy = t.pos - v; } }
+    }
+    return { ...r, x: r.x + dx, y: r.y + dy };
   }
 
   /* ── Pointer events ─────────────────────────────────────────────── */
@@ -1544,30 +1732,33 @@ export class App {
       return;
     }
     if (tool === "crop") {
-      const r = this.session.cropRect;
-      if (r && r.w > 0 && r.h > 0) {
-        // An existing crop box: drag a handle to resize it, drag inside to move it.
-        const t = cropTransform(r);
-        const hit = hitTest(t, p, this.session.zoom, 7, 0);
-        if (hit.kind === "handle") {
-          this.dragMode = "crop-handle";
-          this.transformStart = t;
-          this.transformHandle = hit.handle;
-          return;
-        }
-        if (hit.kind === "inside") {
-          this.dragMode = "crop-move";
-          this.moveStart = p;
-          return;
-        }
+      const r = this.session.cropRect ?? { x: 0, y: 0, w: doc.width, h: doc.height };
+      this.cropSnapTargets = this.cropSnapTargetsFor();
+      const region = this.cropResizeRegion(r, p);
+      if (region) {
+        this.dragMode = "crop-handle";
+        this.transformStart = cropTransform(r);
+        this.transformHandle = region;
+        this.session.cropRect = { ...r };
+        return;
+      }
+      const fullCanvas = r.x === 0 && r.y === 0 && r.w === doc.width && r.h === doc.height;
+      if (!fullCanvas && p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h) {
+        this.dragMode = "crop-move";
+        this.moveStart = p;
+        this.transformStart = cropTransform(r);
+        this.moveApplied = { x: 0, y: 0 };
+        return;
       }
       this.dragMode = "crop";
-      this.marqueeStart = p;
-      this.session.cropRect = { x: p.x, y: p.y, w: 0, h: 0 };
+      this.marqueeStart = { x: Math.round(p.x), y: Math.round(p.y) };
+      this.session.cropRect = null; // a drag on the implicit full-canvas frame starts a new frame
       return;
     }
     if (tool === "eyedropper") {
-      this.sampleColor(p, e.altKey); // Alt sets the background colour, as in Photoshop
+      this.dragMode = "sample";
+      this.session.sampleRing = { x: p.x, y: p.y, original: this.session.foreground, sampled: this.session.foreground };
+      this.sampleColor(p, false); // always the foreground, as in Compositor
       return;
     }
     if (tool === "type") {
@@ -1577,23 +1768,61 @@ export class App {
         this.session.activeLayerId = hit.id;
         this.session.selectedLayerIds = [hit.id];
         this.beginTextEdit(hit.id, false);
-      } else {
-        this.addTextLayer(p.x, p.y, "");
-        this.beginTextEdit(this.session.activeLayerId!, true);
+        return;
       }
+      // Press and drag draws a text box; a click (under 4 × 4) places point text.
+      this.textBoxAnchor = { x: Math.round(p.x), y: Math.round(p.y) };
+      this.dragMode = "text-box";
       return;
     }
-    if (tool === "gradient" || tool === "shape") {
+    if (tool === "gradient") {
+      if (e.altKey) { this.sampleColor(p, false); return; } // Option: the eyedropper, as in the Mac app
+      const g = this.gradientEdit;
+      const near = (q: { x: number; y: number }) => Math.hypot(p.x - q.x, p.y - q.y) * (this.session.zoom || 1) <= 10;
+      if (g && near(g.end)) { this.gradientGrab = "end"; this.dragMode = "gradient-end"; return; }
+      if (g && near(g.start)) { this.gradientGrab = "start"; this.dragMode = "gradient-end"; return; }
+      if (!this.beginGradient(p)) return;
+      this.gradientGrab = "end";
+      this.dragMode = "gradient-end";
+      return;
+    }
+    if (tool === "shape") {
+      this.marqueeStart = { x: Math.round(p.x), y: Math.round(p.y) };
+      this.session.shapeDraft = null;
       this.dragMode = "marquee";
-      this.marqueeStart = p;
-      this.session.cropRect = { x: p.x, y: p.y, w: 0, h: 0 };
-      if (tool === "gradient") this.session.dragLine = { x1: p.x, y1: p.y, x2: p.x, y2: p.y };
       return;
     }
     if (tool === "zoom") {
-      this.session.zoom = e.shiftKey || e.altKey ? Math.max(0.05, this.session.zoom / 1.25) : Math.min(32, this.session.zoom * 1.25);
-      this.emitView();
+      this.dragMode = "zoom";
+      this.zoomDrag = { start: { clientX: e.clientX, clientY: e.clientY }, zoom: this.session.zoom, moved: false };
     }
+  }
+
+  /** Zoom keeping the document point under `anchor` (client coordinates) where it is. */
+  zoomTo(view: HTMLCanvasElement, zoom: number, anchor?: { clientX: number; clientY: number }): void {
+    const doc = this.doc;
+    if (!doc) return;
+    const next = Math.min(32, Math.max(0.001, zoom));
+    if (anchor) {
+      const before = screenToDoc(view, doc, this.session, anchor.clientX, anchor.clientY);
+      const rect = view.getBoundingClientRect();
+      const ax = anchor.clientX - rect.left, ay = anchor.clientY - rect.top;
+      this.session.zoom = next;
+      this.session.panX = ax - rect.width / 2 + (doc.width * next) / 2 - before.x * next;
+      this.session.panY = ay - rect.height / 2 + (doc.height * next) / 2 - before.y * next;
+    } else this.session.zoom = next;
+    this.pendingFit = false;
+    this.emitView();
+  }
+
+  /** ⌘= / ⌘-: the next or previous of Compositor's keyboard zoom levels, about the view centre. */
+  zoomKeyboard(view: HTMLCanvasElement, direction: 1 | -1): void {
+    const levels = [0.125, 1 / 6, 0.25, 1 / 3, 0.5, 2 / 3, 1, 1.25, 1.5, 2, 3, 4, 5, 6, 8, 12, 16];
+    const z = this.session.zoom;
+    const target = direction > 0 ? levels.find((l) => l > z * (1 + 1e-9)) : [...levels].reverse().find((l) => l < z * (1 - 1e-9));
+    if (target === undefined) return;
+    const rect = view.getBoundingClientRect();
+    this.zoomTo(view, target, { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 });
   }
 
   pointerMove(view: HTMLCanvasElement, e: PointerEvent): void {
@@ -1692,6 +1921,62 @@ export class App {
       this.redraw();
       return;
     }
+    if (this.dragMode === "zoom" && this.zoomDrag) {
+      const d = this.zoomDrag;
+      const dx = e.clientX - d.start.clientX;
+      if (Math.abs(dx) >= 3) d.moved = true;
+      if (d.moved) this.zoomTo(view, d.zoom * Math.pow(2, dx / 100), d.start); // right zooms in, doubling every 100 px
+      return;
+    }
+    if (this.dragMode === "sample") {
+      this.sampleColor(p, false);
+      if (this.session.sampleRing) { this.session.sampleRing.x = p.x; this.session.sampleRing.y = p.y; this.session.sampleRing.sampled = this.session.foreground; }
+      return;
+    }
+    if (this.dragMode === "gradient-end" && this.gradientEdit && this.gradientGrab) {
+      const g = this.gradientEdit;
+      const other = this.gradientGrab === "end" ? g.start : g.end;
+      let q = p;
+      if (e.shiftKey) {
+        // Shift: 45° steps about the other end, keeping the length.
+        const a = Math.round(Math.atan2(p.y - other.y, p.x - other.x) / (Math.PI / 4)) * (Math.PI / 4);
+        const len = Math.hypot(p.x - other.x, p.y - other.y);
+        q = { x: other.x + Math.cos(a) * len, y: other.y + Math.sin(a) * len };
+      }
+      if (this.gradientGrab === "end") g.end = q; else g.start = q;
+      this.refreshGradient();
+      return;
+    }
+    if (this.dragMode === "marquee" && this.marqueeStart && this.session.tool === "shape") {
+      const s0 = this.marqueeStart;
+      const q = { x: Math.round(p.x), y: Math.round(p.y) };
+      if (this.session.shapeKind === "line") {
+        let end = q;
+        if (e.shiftKey) {
+          const a = Math.round(Math.atan2(q.y - s0.y, q.x - s0.x) / (Math.PI / 4)) * (Math.PI / 4);
+          const len = Math.hypot(q.x - s0.x, q.y - s0.y);
+          end = { x: s0.x + Math.cos(a) * len, y: s0.y + Math.sin(a) * len };
+        }
+        const x = Math.min(s0.x, end.x), y = Math.min(s0.y, end.y), w = Math.abs(end.x - s0.x), h = Math.abs(end.y - s0.y);
+        this.session.shapeDraft = { kind: "line", x, y, w, h, line: { x0: s0.x, y0: s0.y, x1: end.x, y1: end.y } };
+      } else {
+        let dx = q.x - s0.x, dy = q.y - s0.y;
+        if (e.shiftKey) { const m = Math.max(Math.abs(dx), Math.abs(dy)); dx = Math.sign(dx || 1) * m; dy = Math.sign(dy || 1) * m; }
+        const rect = e.altKey
+          ? { x: s0.x - Math.abs(dx), y: s0.y - Math.abs(dy), w: Math.abs(dx) * 2, h: Math.abs(dy) * 2 }
+          : { x: Math.min(s0.x, s0.x + dx), y: Math.min(s0.y, s0.y + dy), w: Math.abs(dx), h: Math.abs(dy) };
+        this.session.shapeDraft = { kind: this.session.shapeKind, ...rect };
+      }
+      this.overlay();
+      return;
+    }
+    if (this.dragMode === "text-box" && this.textBoxAnchor) {
+      const a = this.textBoxAnchor;
+      const q = { x: Math.round(p.x), y: Math.round(p.y) };
+      this.session.cropRect = { x: Math.min(a.x, q.x), y: Math.min(a.y, q.y), w: Math.abs(q.x - a.x), h: Math.abs(q.y - a.y) };
+      this.overlay();
+      return;
+    }
     if (this.dragMode === "select-move" && this.selectionMove) {
       const sm = this.selectionMove;
       const dx = Math.round(p.x - sm.start.x), dy = Math.round(p.y - sm.start.y);
@@ -1734,23 +2019,30 @@ export class App {
     }
     if (this.dragMode === "crop" && this.marqueeStart) {
       const s0 = this.marqueeStart;
-      let w = Math.abs(p.x - s0.x), h = Math.abs(p.y - s0.y);
-      const ratio = this.session.cropRatio;
-      if (ratio) { if (w / Math.max(1e-6, h) > ratio) h = w / ratio; else w = h * ratio; } // keep the aspect ratio
-      const x = p.x < s0.x ? s0.x - w : s0.x;
-      const y = p.y < s0.y ? s0.y - h : s0.y;
-      this.session.cropRect = { x, y, w, h };
+      const ratio = this.cropRatio();
+      let dx = p.x - s0.x, dy = p.y - s0.y;
+      if (ratio) { if (Math.abs(dx) / Math.max(1e-6, Math.abs(dy)) > ratio) dy = Math.sign(dy || 1) * (Math.abs(dx) / ratio); else dx = Math.sign(dx || 1) * (Math.abs(dy) * ratio); }
+      let rect = e.altKey
+        ? { x: s0.x - Math.abs(dx), y: s0.y - Math.abs(dy), w: Math.abs(dx) * 2, h: Math.abs(dy) * 2 } // Option: symmetric about the start
+        : { x: Math.min(s0.x, s0.x + dx), y: Math.min(s0.y, s0.y + dy), w: Math.abs(dx), h: Math.abs(dy) };
+      if (!ratio && !e.ctrlKey && !e.metaKey) rect = this.snapCropEdges(rect, { left: dx < 0, right: dx >= 0, top: dy < 0, bottom: dy >= 0 }, e.altKey ? s0 : null);
+      this.session.cropRect = this.snapCropRect(rect);
       this.overlay();
     }
     if (this.dragMode === "crop-handle" && this.transformStart && this.transformHandle) {
-      const t = scaleByHandle(this.transformStart, this.transformHandle, p, { proportional: e.shiftKey, fromCenter: e.altKey });
-      this.session.cropRect = { x: t.x, y: t.y, w: t.width, h: t.height };
+      const ratio = this.cropRatio();
+      const t = scaleByHandle(this.transformStart, this.transformHandle, p, { proportional: !!ratio, fromCenter: e.altKey });
+      let rect = { x: t.x, y: t.y, w: t.width, h: t.height };
+      const h = this.transformHandle;
+      if (!ratio && !e.ctrlKey && !e.metaKey) rect = this.snapCropEdges(rect, { left: h.hx < 0, right: h.hx > 0, top: h.hy < 0, bottom: h.hy > 0 }, e.altKey ? { x: this.transformStart.x + this.transformStart.width / 2, y: this.transformStart.y + this.transformStart.height / 2 } : null);
+      this.session.cropRect = this.snapCropRect(rect);
       this.overlay();
     }
-    if (this.dragMode === "crop-move" && this.moveStart && this.session.cropRect) {
-      const r = this.session.cropRect;
-      this.session.cropRect = { ...r, x: r.x + p.x - this.moveStart.x, y: r.y + p.y - this.moveStart.y };
-      this.moveStart = p;
+    if (this.dragMode === "crop-move" && this.moveStart && this.transformStart) {
+      const o = this.transformStart;
+      let rect = { x: o.x + (p.x - this.moveStart.x), y: o.y + (p.y - this.moveStart.y), w: o.width, h: o.height };
+      if (!e.ctrlKey && !e.metaKey) rect = this.snapCropMove(rect);
+      this.session.cropRect = this.snapCropRect(rect);
       this.overlay();
     }
   }
@@ -1987,6 +2279,35 @@ export class App {
       this.emitView();
       return;
     }
+    if (this.dragMode === "zoom" && this.zoomDrag) {
+      const d = this.zoomDrag;
+      this.zoomDrag = null;
+      this.dragMode = "none";
+      if (!d.moved) this.zoomTo(_view, this.session.zoom * (e.altKey ? 0.5 : 2), d.start); // click doubles, Option-click halves
+      return;
+    }
+    if (this.dragMode === "sample") {
+      this.dragMode = "none";
+      this.session.sampleRing = null;
+      this.emitView();
+      return;
+    }
+    if (this.dragMode === "gradient-end") {
+      this.dragMode = "none";
+      this.gradientGrab = null;
+      this.endGradientDrag();
+      return;
+    }
+    if (this.dragMode === "text-box" && this.textBoxAnchor) {
+      const a = this.textBoxAnchor;
+      const r = this.session.cropRect;
+      this.textBoxAnchor = null;
+      this.session.cropRect = null;
+      this.dragMode = "none";
+      if (r && (r.w >= 4 || r.h >= 4)) this.beginTextBox(r);
+      else this.beginPointText(a);
+      return;
+    }
     if (this.dragMode === "brush") {
       this.dragMode = "none";
       this.continueBrush(this.brushPointer ?? screenToDoc(_view, doc, this.session, e.clientX, e.clientY));
@@ -2032,11 +2353,8 @@ export class App {
       } else if (this.session.tool === "lasso") {
         if (this.lassoPoints.length > 2) this.finishLasso(this.downMode);
         else { this.cancelLasso(); if (this.downMode === "replace" && doc.selection) this.deselect(); }
-      } else if (this.session.tool === "gradient" && this.session.dragLine) {
-        this.applyGradient(this.session.dragLine);
-      } else if (this.session.tool === "shape" && r && r.w > 1 && r.h > 1) {
-        this.addShapeLayer(r.x, r.y, r.w, r.h);
-        this.session.cropRect = null;
+      } else if (this.session.tool === "shape") {
+        this.finishShape();
       }
     } else if ((this.dragMode === "crop" || this.dragMode === "crop-handle" || this.dragMode === "crop-move") && this.session.cropRect) {
       const r = this.session.cropRect;
@@ -2115,27 +2433,105 @@ export class App {
    * preset gradient (foreground→background, →transparent, black→white; linear or radial)
    * along the drag. Always lands on its own new layer.
    */
-  private applyGradient(line: { x1: number; y1: number; x2: number; y2: number }): void {
+  /**
+   * Gradient tool (Compositor 1.3): the fill goes into the active layer (or its mask), clipped
+   * to the selection, as a pending edit whose ends can be dragged; Apply / Return, a tool or
+   * layer switch commit it, Esc or the first ⌘Z discard it.
+   */
+  private beginGradient(p: { x: number; y: number }): boolean {
     const doc = this.doc;
-    this.session.dragLine = null;
-    this.session.cropRect = null;
-    if (!doc) return;
-    if (Math.hypot(line.x2 - line.x1, line.y2 - line.y1) < 2) { this.emitView(); return; }
-    const layer = this.insertLayerAboveActive(createBlankLayer(doc, `Gradient ${doc.layers.filter((l) => l.name.startsWith("Gradient")).length + 1}`));
-    const ctx = layer.canvas!.getContext("2d")!;
-    paintGradient(ctx, this.session.gradient, line, this.session.foreground, this.session.background, doc.width, doc.height);
-    if (doc.selection?.mask) {
-      ctx.globalCompositeOperation = "destination-in";
-      ctx.drawImage(doc.selection.mask, 0, 0);
-      ctx.globalCompositeOperation = "source-over";
+    if (!doc) return false;
+    const g = this.gradientEdit;
+    if (g && g.layerId === this.session.activeLayerId && g.mask === this.session.maskSelected) {
+      g.start = { ...p }; g.end = { ...p }; // re-dragging on the same target resets the line
+      this.refreshGradient();
+      return true;
     }
-    this.commit("Gradient");
+    if (g) this.commitGradient();
+    const target = this.paintTarget();
+    if (!target) return false;
+    const base = target.mask ? writableMask(target.layer)! : writableLayer(target.layer)!;
+    this.gradientEdit = { layerId: target.layer.id, mask: target.mask, base: cloneCanvas(base), start: { ...p }, end: { ...p } };
+    return true;
+  }
+
+  gradientHasLine(): boolean {
+    const g = this.gradientEdit;
+    return !!g && Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y) >= 0.5;
+  }
+
+  /** Re-render the pending gradient from its base (never accumulates). */
+  refreshGradient(): void {
+    const doc = this.doc;
+    const g = this.gradientEdit;
+    if (!doc || !g) return;
+    const layer = doc.layers.find((l) => l.id === g.layerId);
+    if (!layer) { this.gradientEdit = null; return; }
+    const target = g.mask ? layer.mask?.canvas : layer.canvas;
+    if (!target) return;
+    const ctx = target.getContext("2d")!;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "copy";
+    ctx.drawImage(g.base, 0, 0);
+    ctx.restore();
+    if (!this.gradientHasLine()) { this.redraw(); return; }
+    const line = { x1: g.start.x, y1: g.start.y, x2: g.end.x, y2: g.end.y };
+    const fill = createCanvas(doc.width, doc.height);
+    const fctx = fill.getContext("2d")!;
+    const fg = g.mask ? (this.session.maskPaintWhite ? "#ffffff" : "#000000") : this.session.foreground;
+    const bg = g.mask ? (this.session.maskPaintWhite ? "#000000" : "#ffffff") : this.session.background;
+    paintGradient(fctx, this.session.gradient, line, fg, bg, doc.width, doc.height);
+    if (doc.selection?.mask) { fctx.globalCompositeOperation = "destination-in"; fctx.drawImage(doc.selection.mask, 0, 0); }
+    if (g.mask) {
+      // On a mask the ramp's brightness becomes coverage: white reveals, black hides.
+      const img = fctx.getImageData(0, 0, doc.width, doc.height);
+      const d = img.data;
+      for (let i = 0; i < d.length; i += 4) { const lum = (d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722) / 255; d[i + 3] = Math.round(d[i + 3] * lum); d[i] = d[i + 1] = d[i + 2] = 255; }
+      fctx.putImageData(img, 0, 0);
+      if (doc.selection?.mask) { ctx.globalCompositeOperation = "destination-out"; ctx.drawImage(doc.selection.mask, 0, 0); }
+      else ctx.clearRect(0, 0, doc.width, doc.height);
+      ctx.globalCompositeOperation = "source-over";
+      ctx.drawImage(fill, 0, 0);
+    } else {
+      enterDocSpace(ctx, layer);
+      ctx.drawImage(fill, 0, 0);
+      ctx.restore();
+    }
+    this.redraw();
+  }
+
+  private endGradientDrag(): void {
+    if (this.gradientEdit && !this.gradientHasLine()) { this.cancelGradient(); return; } // a click with no line cancels
+    this.emitView();
+  }
+
+  commitGradient(): void {
+    const g = this.gradientEdit;
+    if (!g) return;
+    const hasLine = this.gradientHasLine();
+    this.gradientEdit = null;
+    this.dragMode = "none";
+    if (!hasLine) { this.emit(); return; }
+    this.commit(g.mask ? "Gradient Mask" : "Gradient");
+  }
+
+  cancelGradient(): void {
+    const doc = this.doc;
+    const g = this.gradientEdit;
+    this.gradientEdit = null;
+    this.dragMode = "none";
+    if (!doc || !g) return;
+    const layer = doc.layers.find((l) => l.id === g.layerId);
+    if (layer) { if (g.mask && layer.mask) layer.mask.canvas = g.base; else if (!g.mask) layer.canvas = g.base; }
+    this.emit();
   }
 
   /** Change the Gradient tool's preset / style / direction; remembered across sessions. */
   setGradient(patch: Partial<GradientSettings>): void {
     this.session.gradient = { ...this.session.gradient, ...patch };
     saveGradientSettings(this.session.gradient);
+    if (this.gradientEdit) this.refreshGradient(); // the live preview follows the settings
     this.emitView();
   }
 
@@ -2359,6 +2755,7 @@ export class App {
     const { foreground, background } = this.session;
     this.session.foreground = background;
     this.session.background = foreground;
+    if (this.gradientEdit) this.refreshGradient();
     this.emitView();
   }
 
@@ -2397,10 +2794,13 @@ export class App {
     const layer = this.activeLayer;
     if (!doc) return "";
     if (this.session.tool === "crop") {
-      const r = this.session.cropRect;
-      if (!r || r.w <= 0 || r.h <= 0) return "crosshair";
-      const hit = hitTest(cropTransform(r), screenToDoc(view, doc, this.session, e.clientX, e.clientY), this.session.zoom, 7, 0);
-      return hit.kind === "outside" ? "crosshair" : cursorFor(hit, 0);
+      const r = this.visibleCropRect();
+      if (!r) return "crosshair";
+      const p = screenToDoc(view, doc, this.session, e.clientX, e.clientY);
+      const region = this.cropResizeRegion(r, p);
+      if (region) return cursorFor({ kind: "handle", handle: { ...region, x: 0, y: 0 } }, 0);
+      const full = r.x === 0 && r.y === 0 && r.w === doc.width && r.h === doc.height;
+      return !full && p.x >= r.x && p.y >= r.y && p.x <= r.x + r.w && p.y <= r.y + r.h ? "move" : "crosshair";
     }
     if (this.session.tool !== "move") return "";
     const controls = this.session.showTransformControls || !!this.transformEdit?.persistent;

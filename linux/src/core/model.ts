@@ -118,9 +118,13 @@ export interface TextLayerData {
   fontSize: number;
   color: string;
   align: CanvasTextAlign;
+  /** Line height as a multiple of the font size (1.2 = Compositor's "Auto" leading). */
   lineHeight: number;
   letterSpacing: number;
   weight: number;
+  /** Fixed text box (Compositor's drag-a-box type): words wrap to this width; nil = point text. */
+  boxWidth?: number;
+  boxHeight?: number;
 }
 
 export interface ShapeLayerData {
@@ -129,6 +133,8 @@ export interface ShapeLayerData {
   stroke: string;
   strokeWidth: number;
   radius: number;
+  /** Lines: endpoints as fractions of the layer box, so scaling keeps them exact (Compositor). */
+  line?: { x0: number; y0: number; x1: number; y1: number };
 }
 
 export type LayerKind = "raster" | "group" | "adjustment" | "text" | "shape";
@@ -234,6 +240,17 @@ export interface SessionState {
   locksTransformRatio: boolean;
   /** Accent lines drawn while a move snaps to guides, layers or the canvas. */
   snapLines: { axis: "x" | "y"; pos: number }[];
+  /** Shape tool: line thickness (px) and rectangle corner radius (px). */
+  shapeLineWidth: number;
+  shapeCornerRadius: number;
+  /** Eyedropper: show the ring comparing the new and previous colour while sampling. */
+  showsSampleRing: boolean;
+  /** The eyedropper's ring while the button is down (document point, colours). */
+  sampleRing: { x: number; y: number; original: string; sampled: string } | null;
+  /** Crop header "Ratio" choice. */
+  cropRatioChoice: "Free" | "Original" | "1:1" | "4:3" | "3:4" | "16:9" | "9:16";
+  /** Shape draft while dragging (document space), drawn in the foreground colour. */
+  shapeDraft: { kind: ShapeKind; x: number; y: number; w: number; h: number; line?: { x0: number; y0: number; x1: number; y1: number } } | null;
   /** On a mask: paint white (reveal) instead of black (hide). */
   maskPaintWhite: boolean;
   foreground: string;
@@ -271,8 +288,6 @@ export interface SessionState {
   /** Gradient tool preset, style and direction (remembered between sessions). */
   gradient: GradientSettings;
   cropRect: { x: number; y: number; w: number; h: number } | null;
-  /** Crop tool aspect ratio (width / height), null for free. */
-  cropRatio: number | null;
   /** Start→end of a gradient drag, drawn as a guide line while dragging. */
   dragLine: { x1: number; y1: number; x2: number; y2: number } | null;
   /** Pointer position over the canvas in document space (for the brush size preview). */

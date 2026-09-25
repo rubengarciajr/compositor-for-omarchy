@@ -115,26 +115,64 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         if (doc?.selection?.mask) drawAnts(ctx, doc.selection.outline ?? doc.selection.mask, app.session.zoom || 1, performance.now() / 120);
         drawTransformControls(ctx);
         drawBrushPreview(ctx);
-        const line = app.session.dragLine;
-        if (line && app.session.tool === "gradient") {
+        const ge = app.gradientEdit;
+        if (ge && app.gradientHasLine() && app.session.tool !== "crop") {
           const z = app.session.zoom || 1;
-          ctx.save();
-          ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7aa2f7";
-          ctx.lineWidth = 1.5 / z;
-          ctx.beginPath();
-          ctx.moveTo(line.x1, line.y1);
-          ctx.lineTo(line.x2, line.y2);
-          ctx.stroke();
           const g = app.session.gradient;
           const stops = gradientStops(g.preset, app.session.foreground, app.session.background, g.reverse);
-          ctx.fillStyle = stops[0].color;
-          ctx.beginPath(); ctx.arc(line.x1, line.y1, 5 / z, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-          ctx.fillStyle = stops[stops.length - 1].color;
-          ctx.beginPath(); ctx.arc(line.x2, line.y2, 5 / z, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+          ctx.save();
           if (g.style === "radial") {
             ctx.setLineDash([4 / z, 4 / z]);
-            ctx.beginPath(); ctx.arc(line.x1, line.y1, Math.hypot(line.x2 - line.x1, line.y2 - line.y1), 0, Math.PI * 2); ctx.stroke();
+            ctx.beginPath(); ctx.arc(ge.start.x, ge.start.y, Math.hypot(ge.end.x - ge.start.x, ge.end.y - ge.start.y), 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 2 / z; ctx.stroke();
+            ctx.strokeStyle = "rgba(255,255,255,0.8)"; ctx.lineWidth = 1 / z; ctx.stroke();
+            ctx.setLineDash([]);
           }
+          ctx.beginPath(); ctx.moveTo(ge.start.x, ge.start.y); ctx.lineTo(ge.end.x, ge.end.y);
+          ctx.strokeStyle = "rgba(0,0,0,0.7)"; ctx.lineWidth = 3 / z; ctx.stroke();
+          ctx.strokeStyle = "#fff"; ctx.lineWidth = 1 / z; ctx.stroke();
+          for (const [pt, color] of [[ge.start, stops[0].color], [ge.end, stops[stops.length - 1].color]] as const) {
+            ctx.beginPath(); ctx.arc(pt.x, pt.y, 6 / z, 0, Math.PI * 2);
+            ctx.fillStyle = "#fff"; ctx.fill(); ctx.strokeStyle = "#000"; ctx.lineWidth = 1 / z; ctx.stroke();
+            ctx.beginPath(); ctx.arc(pt.x, pt.y, 3.5 / z, 0, Math.PI * 2);
+            ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.fill(); ctx.fillStyle = color; ctx.fill();
+          }
+          ctx.restore();
+        }
+        const draft = app.session.shapeDraft;
+        if (draft && app.session.tool === "shape") {
+          const z = app.session.zoom || 1;
+          ctx.save();
+          ctx.fillStyle = app.session.foreground;
+          ctx.strokeStyle = app.session.foreground;
+          ctx.beginPath();
+          if (draft.kind === "line" && draft.line) {
+            ctx.lineCap = "round";
+            ctx.lineWidth = Math.max(1 / z, app.session.shapeLineWidth);
+            ctx.moveTo(draft.line.x0, draft.line.y0); ctx.lineTo(draft.line.x1, draft.line.y1); ctx.stroke();
+          } else if (draft.kind === "ellipse") { ctx.ellipse(draft.x + draft.w / 2, draft.y + draft.h / 2, draft.w / 2, draft.h / 2, 0, 0, Math.PI * 2); ctx.fill(); }
+          else { const r = Math.min(app.session.shapeCornerRadius, draft.w / 2, draft.h / 2); if (r > 0) ctx.roundRect(draft.x, draft.y, draft.w, draft.h, r); else ctx.rect(draft.x, draft.y, draft.w, draft.h); ctx.fill(); }
+          ctx.restore();
+          return;
+        }
+        const ring = app.session.sampleRing;
+        if (ring && app.session.showsSampleRing) {
+          const z = app.session.zoom || 1;
+          ctx.save();
+          ctx.beginPath(); ctx.arc(ring.x, ring.y, 43 / z, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(255,255,255,0.45)"; ctx.lineWidth = 24 / z; ctx.stroke();
+          ctx.lineWidth = 16 / z;
+          ctx.beginPath(); ctx.arc(ring.x, ring.y, 43 / z, Math.PI, 0); ctx.strokeStyle = ring.sampled; ctx.stroke(); // top: the new colour
+          ctx.beginPath(); ctx.arc(ring.x, ring.y, 43 / z, 0, Math.PI); ctx.strokeStyle = ring.original; ctx.stroke(); // bottom: the colour before
+          ctx.restore();
+        }
+        if (app.session.tool === "type" && app.session.cropRect) {
+          const z = app.session.zoom || 1;
+          const r = app.session.cropRect;
+          ctx.save();
+          ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7aa2f7";
+          ctx.lineWidth = 1 / z;
+          ctx.strokeRect(r.x, r.y, r.w, r.h);
           ctx.restore();
           return;
         }
@@ -174,32 +212,34 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
           ctx.restore();
           return;
         }
-        const cr = app.session.cropRect;
-        if (!cr) return;
+        const cr = app.visibleCropRect();
+        if (!cr || !doc) return;
+        const z = app.session.zoom || 1;
         ctx.save();
-        ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#7aa2f7";
-        ctx.lineWidth = 2 / (app.session.zoom || 1);
-        ctx.setLineDash([6 / (app.session.zoom || 1), 4 / (app.session.zoom || 1)]);
+        // Compositor's crop overlay: darkened outside, a white frame, rule-of-thirds, 8 × 8 handles.
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.beginPath();
+        ctx.rect(Math.min(0, cr.x) - 1e5, Math.min(0, cr.y) - 1e5, 2e5 + doc.width, 2e5 + doc.height);
+        ctx.rect(cr.x, cr.y, cr.w, cr.h);
+        ctx.fill("evenodd");
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 1 / z;
         ctx.strokeRect(cr.x, cr.y, cr.w, cr.h);
-        ctx.setLineDash([]);
-        if (app.session.tool === "crop" && cr.w > 0 && cr.h > 0) {
-          // handles like the Move tool's: drag to resize the crop box, drag inside to move it
-          const s = 8 / (app.session.zoom || 1);
-          ctx.fillStyle = "#ffffff";
-          for (const h of handlePositions({ x: cr.x, y: cr.y, width: cr.w, height: cr.h, rotation: 0, flipH: false, flipV: false })) {
-            ctx.beginPath();
-            ctx.rect(h.x - s / 2, h.y - s / 2, s, s);
-            ctx.fill();
-            ctx.stroke();
-          }
+        ctx.strokeStyle = "rgba(255,255,255,0.4)";
+        ctx.beginPath();
+        for (const f of [1 / 3, 2 / 3]) {
+          ctx.moveTo(cr.x + cr.w * f, cr.y); ctx.lineTo(cr.x + cr.w * f, cr.y + cr.h);
+          ctx.moveTo(cr.x, cr.y + cr.h * f); ctx.lineTo(cr.x + cr.w, cr.y + cr.h * f);
         }
-        ctx.fillStyle = "rgba(0,0,0,0.35)";
-        // dim outside
-        if (doc) {
+        ctx.stroke();
+        const s = 8 / z;
+        ctx.fillStyle = "#fff";
+        ctx.strokeStyle = "#000";
+        for (const h of handlePositions({ x: cr.x, y: cr.y, width: cr.w, height: cr.h, rotation: 0, flipH: false, flipV: false })) {
           ctx.beginPath();
-          ctx.rect(0, 0, doc.width, doc.height);
-          ctx.rect(cr.x, cr.y, cr.w, cr.h);
-          ctx.fill("evenodd");
+          ctx.rect(h.x - s / 2, h.y - s / 2, s, s);
+          ctx.fill();
+          ctx.stroke();
         }
         ctx.restore();
       });
@@ -517,14 +557,22 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       ta.spellcheck = false;
       ta.addEventListener("input", () => {
         app.setText({ text: ta.value });
-        const top = document.getElementById("type-text") as HTMLInputElement | null;
-        if (top) top.value = ta.value;
         syncTextEditor();
       });
       ta.addEventListener("keydown", (e) => {
         e.stopPropagation();
         if (e.key === "Escape") { e.preventDefault(); app.endTextEdit(false); }
         else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); app.endTextEdit(true); }
+        else if (e.altKey && e.key.startsWith("Arrow")) {
+          // Option-arrows: tracking (left / right) and leading (up / down), by 10 with Shift.
+          e.preventDefault();
+          const step = e.shiftKey ? 10 : 1;
+          const t = app.activeLayer?.text;
+          if (!t) return;
+          if (e.key === "ArrowLeft" || e.key === "ArrowRight") app.setText({ letterSpacing: t.letterSpacing + (e.key === "ArrowRight" ? step : -step) });
+          else { const px = t.lineHeight * t.fontSize + (e.key === "ArrowDown" ? step : -step); app.setText({ lineHeight: Math.max(1, px) / t.fontSize }); }
+          syncTextEditor();
+        }
       });
       ta.addEventListener("pointerdown", (e) => e.stopPropagation());
       canvasWrap.appendChild(ta);
@@ -543,6 +591,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     s.left = `${ox + tr.x * z}px`;
     s.top = `${oy + tr.y * z}px`;
     const { sx, sy } = textScale(layer); // type stretched by the handles keeps its ratio while editing
+    s.whiteSpace = t.boxWidth ? "pre-wrap" : "pre";
+    s.wordBreak = t.boxWidth ? "break-word" : "normal";
     s.width = `${Math.max(tr.width / sx * z, t.fontSize * z)}px`;
     s.height = `${Math.max(tr.height / sy * z, t.fontSize * z) + Math.max(0, halfLead)}px`;
     s.transformOrigin = "0 0";
@@ -689,8 +739,10 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     ]);
     const viewMenu = menu("View", [
       { label: "Toggle Pixel Grid", action: () => { app.session.showPixelGrid = !app.session.showPixelGrid; app.emit(); } },
-      { label: "Fit on Screen", shortcut: "⌘0", action: () => app.fit(canvas) },
-      { label: "Zoom 100%", shortcut: "⌘1", action: () => { app.session.zoom = 1; app.session.panX = 0; app.session.panY = 0; app.emit(); } },
+      { label: "Fit Canvas", shortcut: "⌘0", action: () => app.fit(canvas) },
+      { label: "Actual Pixels", shortcut: "⌘1", action: () => { app.session.zoom = 1; app.session.panX = 0; app.session.panY = 0; app.emit(); } },
+      { label: "Zoom In", shortcut: "⌘=", action: () => app.zoomKeyboard(canvas, 1) },
+      { label: "Zoom Out", shortcut: "⌘-", action: () => app.zoomKeyboard(canvas, -1) },
       { sep: true, label: "" },
       ...THEME_CHOICES.map((c) => ({
         label: `${themeChoice() === c.id ? "●" : "○"}  Theme: ${c.label}`,
@@ -825,28 +877,6 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       return f;
     };
 
-    const range = (value: number, min: number, max: number, step: number, on: (v: number) => void) => {
-      const input = document.createElement("input");
-      input.type = "range";
-      input.min = String(min);
-      input.max = String(max);
-      input.step = String(step);
-      input.value = String(value);
-      const val = document.createElement("span");
-      val.className = "val";
-      val.textContent = String(Math.round(value * 100) / 100);
-      input.addEventListener("input", () => {
-        const v = Number(input.value);
-        val.textContent = String(Math.round(v * 100) / 100);
-        on(v);
-      });
-      const wrap = document.createElement("div");
-      wrap.style.display = "flex";
-      wrap.style.alignItems = "center";
-      wrap.style.gap = "6px";
-      wrap.append(input, val);
-      return wrap;
-    };
 
     if (tool === "move") {
       const layer = app.activeLayer;
@@ -1032,54 +1062,49 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
           : "Click to select similar colors · Shift add · Option subtract · Drag inside to move · ⌘-drag moves pixels · Delete clears · ⌘D deselect";
       toolHeader.append(how);
     } else if (tool === "shape") {
-      const sel = document.createElement("select");
-      sel.innerHTML = `<option value="rect">Rectangle</option><option value="rounded">Rounded</option><option value="ellipse">Ellipse</option><option value="line">Line</option>`;
-      sel.value = s.shapeKind;
-      sel.addEventListener("change", () => { s.shapeKind = sel.value as typeof s.shapeKind; app.emit(); });
-      toolHeader.append(field("Shape", sel));
       const shapeLayer = app.activeLayer?.kind === "shape" ? app.activeLayer : null;
-      if (shapeLayer?.shape) {
-        // Edit the selected shape live, Photoshop's shape options bar.
-        const sh = shapeLayer.shape;
-        const colorInput = (value: string, on: (v: string) => void, label: string) => {
-          const c = document.createElement("input");
-          c.type = "color";
-          c.value = value;
-          c.addEventListener("input", () => on(c.value));
-          c.addEventListener("change", () => app.commit(label));
-          return c;
-        };
-        toolHeader.append(
-          field("Fill", colorInput(sh.fill, (v) => app.setShape({ fill: v }), "Shape fill")),
-          field("Stroke", colorInput(sh.stroke, (v) => app.setShape({ stroke: v }), "Shape stroke")),
-          field("Width", range(sh.strokeWidth, 0, 40, 1, (v) => app.setShape({ strokeWidth: v }))),
-        );
-        if (sh.kind === "rounded") toolHeader.append(field("Radius", range(sh.radius, 0, 200, 1, (v) => app.setShape({ radius: v }))));
-        toolHeader.querySelectorAll<HTMLInputElement>('input[type="range"]').forEach((r) => r.addEventListener("change", () => app.commit("Edit shape")));
-      }
+      const kindNow = s.shapeKind === "rounded" ? "rect" : s.shapeKind;
+      toolHeader.append(segmented([{ value: "rect", label: "Rectangle" }, { value: "ellipse", label: "Ellipse" }, { value: "line", label: "Line" }] as const, kindNow, (v) => { s.shapeKind = v; app.cancelShape(); app.emitView(); }, "Shift-U (or Tab) steps through Rectangle, Ellipse and Line"));
+      const sliderField = (label: string, value: number, sliderMax: number, min: number, max: number, help: string, on: (v: number) => void) => {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex"; wrap.style.alignItems = "center"; wrap.style.gap = "6px";
+        const slider = document.createElement("input");
+        slider.type = "range"; slider.min = String(min); slider.max = String(sliderMax); slider.step = "1"; slider.value = String(Math.min(sliderMax, value)); slider.style.width = "100px";
+        const f = numberField(value, min, max, 1, (v) => { slider.value = String(Math.min(sliderMax, v)); on(Math.round(v)); }, { unit: "px", width: 56, help });
+        slider.addEventListener("input", () => { f.querySelector("input")!.value = slider.value; on(Number(slider.value)); });
+        slider.addEventListener("change", () => { if (shapeLayer) app.commit("Edit shape"); });
+        f.querySelector("input")!.addEventListener("change", () => { if (shapeLayer) app.commit("Edit shape"); });
+        wrap.append(slider, f);
+        return field(label, wrap);
+      };
+      if (kindNow === "line") toolHeader.append(sliderField("Width", shapeLayer?.shape?.kind === "line" ? shapeLayer.shape.strokeWidth : s.shapeLineWidth, 100, 1, 5000, "Line thickness in pixels", (v) => { s.shapeLineWidth = v; if (shapeLayer?.shape?.kind === "line") app.setShape({ strokeWidth: v }); }));
+      if (kindNow === "rect") toolHeader.append(sliderField("Radius", shapeLayer?.shape && shapeLayer.shape.kind !== "line" && shapeLayer.shape.kind !== "ellipse" ? shapeLayer.shape.radius : s.shapeCornerRadius, 200, 0, 5000, "Round the rectangle's corners by this many pixels; 0 keeps them square", (v) => { s.shapeCornerRadius = v; if (shapeLayer?.shape && (shapeLayer.shape.kind === "rect" || shapeLayer.shape.kind === "rounded")) app.setShape({ radius: v, kind: v > 0 ? "rounded" : "rect" }); }));
+      const fill = document.createElement("input");
+      fill.type = "color";
+      fill.className = "brush-color";
+      fill.value = shapeLayer?.shape ? (shapeLayer.shape.kind === "line" ? shapeLayer.shape.stroke : shapeLayer.shape.fill) : s.foreground;
+      fill.title = "Shapes fill with the foreground color; click to change it";
+      fill.addEventListener("input", () => {
+        s.foreground = fill.value;
+        const well = toolRail.querySelector<HTMLInputElement>(".swatches .fg");
+        if (well) well.value = fill.value;
+        if (shapeLayer?.shape) app.setShape(shapeLayer.shape.kind === "line" ? { stroke: fill.value } : { fill: fill.value });
+      });
+      fill.addEventListener("change", () => { if (shapeLayer) app.commit("Shape fill"); else app.emitView(); });
+      toolHeader.append(field("Fill", fill));
       const how = document.createElement("div");
       how.className = "hint";
-      how.textContent = "Drag to draw · Shift keeps it square / round · Alt draws from the centre";
+      how.textContent = `Drag to draw a shape on a new layer · Shift ${kindNow === "line" ? "45°" : kindNow === "rect" ? "square" : "circle"} · Option from center · Shift-U or Tab for the next shape · Escape cancel · Space to pan`;
       toolHeader.append(how);
     } else if (tool === "type") {
       // Values come from the selected text layer when there is one, else the defaults for the next.
       const t = app.activeLayer?.kind === "text" && app.activeLayer.text ? app.activeLayer.text : s.text;
-      const commitLater = (label: string) => () => app.commit(label);
-
-      const text = document.createElement("input");
-      text.type = "text";
-      text.id = "type-text";
-      text.value = t.text;
-      text.placeholder = "Type, then click the canvas";
-      text.style.width = "220px";
-      text.addEventListener("input", () => app.setText({ text: text.value }));
-      text.addEventListener("change", commitLater("Edit text"));
-      text.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === "Escape") text.blur();
-      });
-
+      const editing = !!app.session.textEdit;
+      const live = app.activeLayer?.kind === "text";
+      const commitLater = (label: string) => () => { if (live && !editing) app.commit(label); };
       const family = document.createElement("select");
       family.className = "font-select";
+      family.title = "Font face";
       const fillFamilies = (list: string[]) => {
         family.innerHTML = "";
         const all = [...new Set([t.fontFamily, ...list])];
@@ -1107,9 +1132,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
           return;
         }
         app.setText({ fontFamily: family.value });
-        app.commit("Font");
+        commitLater("Edit Text")();
       });
-
       const weight = document.createElement("select");
       for (const [w, label] of FONT_WEIGHTS) {
         const o = document.createElement("option");
@@ -1118,84 +1142,106 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         weight.appendChild(o);
       }
       weight.value = String(FONT_WEIGHTS.some(([w]) => w === t.weight) ? t.weight : 400);
-      weight.addEventListener("change", () => { app.setText({ weight: Number(weight.value) }); app.commit("Font weight"); });
-
-      const size = range(t.fontSize, 8, 280, 1, (v) => app.setText({ fontSize: v }));
-      size.querySelector("input")!.addEventListener("change", commitLater("Text size"));
-
+      weight.addEventListener("change", () => { app.setText({ weight: Number(weight.value) }); commitLater("Edit Text")(); });
+      const size = numberField(t.fontSize, 1, 2000, 1, (v) => app.setText({ fontSize: v }), { unit: "px", width: 56 });
+      size.querySelector("input")!.addEventListener("change", commitLater("Edit Text"));
       const color = document.createElement("input");
       color.type = "color";
+      color.className = "brush-color";
       color.value = t.color;
-      color.title = "Text colour";
+      color.title = "Text color";
       color.addEventListener("input", () => app.setText({ color: color.value }));
-      color.addEventListener("change", commitLater("Text colour"));
-
+      color.addEventListener("change", commitLater("Edit Text"));
       const align = document.createElement("div");
       align.className = "seg";
-      for (const [value, glyph, title] of [["left", "align-left", "Align left"], ["center", "align-center", "Align centre"], ["right", "align-right", "Align right"]] as const) {
+      for (const [value, glyph, title] of [["left", "align-left", "Align left"], ["center", "align-center", "Align center"], ["right", "align-right", "Align right"]] as const) {
         const b = document.createElement("button");
         b.innerHTML = icon(glyph, 16);
         b.title = title;
         b.dataset.align = value;
         b.classList.toggle("active", t.align === value);
-        b.addEventListener("click", () => { app.setText({ align: value }); app.commit("Text align"); });
+        b.addEventListener("click", () => { app.setText({ align: value }); commitLater("Edit Text")(); });
         align.appendChild(b);
       }
-
-      const numField = (value: number, min: number, max: number, step: number, on: (v: number) => void, label: string) => {
-        const i = document.createElement("input");
-        i.type = "number";
-        i.min = String(min); i.max = String(max); i.step = String(step);
-        i.value = String(value);
-        i.style.width = "62px";
-        i.addEventListener("input", () => { const v = Number(i.value); if (Number.isFinite(v)) on(v); });
-        i.addEventListener("change", commitLater(label));
-        return i;
-      };
-      const lineH = numField(t.lineHeight, 0.5, 4, 0.05, (v) => app.setText({ lineHeight: v }), "Line height");
-      const tracking = numField(t.letterSpacing, -20, 200, 0.5, (v) => app.setText({ letterSpacing: v }), "Letter spacing");
-
+      const tracking = numberField(t.letterSpacing, -100, 1000, 1, (v) => app.setText({ letterSpacing: v }), { width: 50 });
+      tracking.querySelector("input")!.addEventListener("change", commitLater("Edit Text"));
+      // Leading is baseline to baseline in pixels; empty or 0 is Auto (120 % of the size).
+      const leadingPx = Math.abs(t.lineHeight - 1.2) < 1e-6 ? 0 : Math.round(t.lineHeight * t.fontSize);
+      const leading = numberField(leadingPx, 0, 5000, 1, (v) => app.setText({ lineHeight: v > 0 ? v / t.fontSize : 1.2 }), { width: 56, help: "Line height, baseline to baseline. Empty or 0 is Auto: 120% of the font size." });
+      const leadInput = leading.querySelector("input")!;
+      leadInput.placeholder = "Auto";
+      if (leadingPx === 0) leadInput.value = "";
+      leadInput.addEventListener("change", commitLater("Edit Text"));
+      toolHeader.append(field("Font", family), field("Weight", weight), field("Size", size), field("Color", color), align, field("Tracking", tracking), field("Leading", leading));
+      if (editing) {
+        const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.addEventListener("click", () => app.endTextEdit(false));
+        const done = document.createElement("button"); done.textContent = "Done"; done.className = "active"; done.addEventListener("click", () => app.endTextEdit(true));
+        toolHeader.append(cancel, done);
+      } else {
+        const edit = document.createElement("button"); edit.textContent = "Edit Text"; edit.disabled = !live;
+        edit.addEventListener("click", () => { const l = app.activeLayer; if (l?.kind === "text") app.beginTextEdit(l.id, false); });
+        toolHeader.append(edit);
+      }
       const hint = document.createElement("div");
       hint.className = "hint";
-      hint.textContent = app.session.textEdit
-        ? "Editing on canvas · Ctrl+Enter or click away to commit · Esc to cancel"
-        : "Click the canvas to type there, or click existing text to edit it";
-      toolHeader.append(
-        field("Text", text),
-        field("Font", family),
-        field("Weight", weight),
-        field("Size", size),
-        field("Colour", color),
-        field("Align", align),
-        field("Leading", lineH),
-        field("Tracking", tracking),
-        hint,
-      );
-
+      hint.textContent = "Drag a text box · Click text to edit · ⌘Return finish · Escape cancel";
+      toolHeader.append(hint);
     } else if (tool === "crop") {
+      const ratio = document.createElement("select");
+      ratio.innerHTML = ["Free", "Original", "1:1", "4:3", "3:4", "16:9", "9:16"].map((l) => `<option value="${l}">${l}</option>`).join("");
+      ratio.value = s.cropRatioChoice;
+      ratio.addEventListener("change", () => app.changeCropRatio(ratio.value as typeof s.cropRatioChoice));
+      toolHeader.append(field("Ratio", ratio));
+      if (s.cropRect) {
+        const size = document.createElement("div");
+        size.className = "hint";
+        size.style.fontVariantNumeric = "tabular-nums";
+        size.textContent = `${Math.round(s.cropRect.w)} × ${Math.round(s.cropRect.h)} px`;
+        toolHeader.append(size);
+      }
+      const cancel = document.createElement("button");
+      cancel.textContent = "Cancel";
+      cancel.disabled = !s.cropRect;
+      cancel.addEventListener("click", () => app.cancelCrop());
       const apply = document.createElement("button");
       apply.textContent = "Apply Crop";
       apply.className = "active";
+      apply.disabled = !s.cropRect;
       apply.addEventListener("click", () => app.applyCrop());
-      const cancel = document.createElement("button");
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => { app.session.cropRect = null; app.emit(); });
-      const ratio = document.createElement("select");
-      const ratios: [string, number | null][] = [["Free", null], ["1:1", 1], ["4:3", 4 / 3], ["3:4", 3 / 4], ["16:9", 16 / 9], ["9:16", 9 / 16]];
-      ratio.innerHTML = ratios.map(([l, v]) => `<option value="${v ?? ""}">${l}</option>`).join("");
-      ratio.value = s.cropRatio == null ? "" : String(s.cropRatio);
-      ratio.addEventListener("change", () => { s.cropRatio = ratio.value === "" ? null : Number(ratio.value); });
       const how = document.createElement("div");
       how.className = "hint";
-      how.textContent = "Drag the area · drag the handles to adjust, inside to move · Enter applies · Esc cancels";
-      toolHeader.append(field("Ratio", ratio), apply, cancel, how);
+      how.textContent = "Drag to crop · Enter apply · Escape cancel · Space to pan";
+      toolHeader.append(cancel, apply, how);
     } else if (tool === "gradient") {
       toolHeader.append(...gradientHeader());
     } else if (tool === "eyedropper") {
-      const info = document.createElement("div");
-      info.className = "title";
-      info.textContent = `FG ${s.foreground}`;
-      toolHeader.append(info);
+      const ring = document.createElement("button");
+      ring.className = "toggle" + (s.showsSampleRing ? " active" : "");
+      ring.textContent = "Sample Ring";
+      ring.addEventListener("click", () => { s.showsSampleRing = !s.showsSampleRing; app.emitView(); });
+      toolHeader.append(ring);
+    } else if (tool === "zoom") {
+      const pct = numberField(Math.round(s.zoom * 10000) / 100, 0.1, 3200, 1, () => {}, { unit: "%", width: 72, help: "Zoom percentage (0.1–3200%). Press Return to apply.", digits: 2 });
+      const input = pct.querySelector("input")!;
+      input.removeEventListener("input", () => {});
+      const applyZoom = () => { const v = Number(input.value); if (Number.isFinite(v) && v > 0) app.zoomTo(canvas, v / 100); };
+      input.addEventListener("change", applyZoom);
+      input.addEventListener("blur", applyZoom);
+      toolHeader.append(pct);
+      const how = document.createElement("div");
+      how.className = "hint";
+      how.textContent = "Click to zoom in · Option-click to zoom out · Drag right or left to zoom smoothly · Space to pan";
+      toolHeader.append(how);
+    } else if (tool === "hand") {
+      const how = document.createElement("div");
+      how.className = "hint";
+      how.textContent = "Drag to pan · Ctrl or Alt + wheel zooms";
+      toolHeader.append(how);
+    } else if (tool === "idle") {
+      const how = document.createElement("div");
+      how.className = "hint";
+      how.textContent = "No tool selected · Press a tool's key to pick one · Space to pan";
+      toolHeader.append(how);
     }
 
     const spacer = document.createElement("div");
@@ -1238,11 +1284,35 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     reverse.title = "Reverse the gradient direction";
     reverse.innerHTML = `${icon("swap", 14)}<span>Reverse</span>`;
     reverse.addEventListener("click", () => app.setGradient({ reverse: !g.reverse }));
+    styles.title = "Linear runs along the line; Radial spreads out from the start point";
 
+    // Opacity slider + percent field, as Compositor pairs them.
+    const opacity = document.createElement("div");
+    opacity.className = "field";
+    opacity.innerHTML = "<label>Opacity</label>";
+    const slider = document.createElement("input");
+    slider.type = "range"; slider.min = "0.01"; slider.max = "1"; slider.step = "0.01"; slider.value = String(g.opacity); slider.style.width = "100px";
+    const pctIn = document.createElement("input");
+    pctIn.type = "number"; pctIn.min = "1"; pctIn.max = "100"; pctIn.step = "1"; pctIn.value = String(Math.round(g.opacity * 100)); pctIn.style.width = "54px";
+    pctIn.title = "Press 1–9 for 10–90%, 0 for 100%";
+    slider.addEventListener("input", () => { pctIn.value = String(Math.round(Number(slider.value) * 100)); app.setGradient({ opacity: Number(slider.value) }); });
+    pctIn.addEventListener("input", () => { const v = Math.min(100, Math.max(1, Number(pctIn.value) || 100)); slider.value = String(v / 100); app.setGradient({ opacity: v / 100 }); });
+    const unit = document.createElement("span"); unit.className = "unit"; unit.textContent = "%";
+    opacity.append(slider, pctIn, unit);
+    makeScrubby(opacity.querySelector("label")!, pctIn);
+
+    const out: HTMLElement[] = [pick, styles, reverse, opacity];
+    if (s.maskSelected && app.activeLayer?.mask) { const m = document.createElement("div"); m.className = "hint"; m.textContent = "Mask"; out.push(m); }
+    if (app.gradientEdit) {
+      const cancel = document.createElement("button"); cancel.textContent = "Cancel"; cancel.addEventListener("click", () => app.cancelGradient());
+      const apply = document.createElement("button"); apply.textContent = "Apply"; apply.className = "active"; apply.addEventListener("click", () => app.commitGradient());
+      out.push(cancel, apply);
+    }
     const hint = document.createElement("div");
     hint.className = "hint";
-    hint.textContent = "Drag on the canvas · fills a new layer (or the selection)";
-    return [pick, styles, reverse, hint];
+    hint.textContent = "Drag to draw · Drag ends to adjust · Shift 45° · 1–0 opacity · Enter apply · Escape cancel";
+    out.push(hint);
+    return out;
   }
 
   function openGradientPopover(anchor: HTMLElement): void {
@@ -1692,24 +1762,21 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     if (e.button === 2 && app.isBrushTool()) { if (!tipMoved) canvasMenu(e.clientX, e.clientY); return; }
     mods.dragging = false;
     applyCursor(e);
-    // Placing text: hand the keyboard to the text field so typing starts immediately.
-    if (app.session.tool === "type" && app.activeLayer?.kind === "text" && !app.session.textEdit) {
-      const input = document.getElementById("type-text") as HTMLInputElement | null;
-      input?.focus();
-      input?.select();
-    }
   });
   canvas.addEventListener("pointercancel", (e) => app.pointerUp(canvas, e));
   canvas.addEventListener("wheel", (e) => {
     e.preventDefault();
-    if (e.ctrlKey || e.metaKey) {
-      const factor = e.deltaY > 0 ? 0.9 : 1.1;
-      app.session.zoom = Math.min(32, Math.max(0.05, app.session.zoom * factor));
+    if (app.painting) return; // a stroke keeps the view still
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      // Ctrl / Alt + wheel zooms about the pointer, as Compositor's Command / Option scroll does.
+      const dy = e.deltaMode === 1 ? e.deltaY * 12 : e.deltaY;
+      app.zoomTo(canvas, app.session.zoom * Math.exp(-dy * 0.015), e);
     } else {
-      app.session.panX -= e.deltaX;
-      app.session.panY -= e.deltaY;
+      const k = e.deltaMode === 1 ? 12 : 1;
+      app.session.panX -= e.deltaX * k;
+      app.session.panY -= e.deltaY * k;
+      app.emitView();
     }
-    app.emit();
   }, { passive: false });
 
   /* menus close on outside click */
@@ -1754,10 +1821,15 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     if (mod && key === "d") { e.preventDefault(); app.deselect(); return; }
     if (mod && e.shiftKey && key === "i") { e.preventDefault(); app.invertSelection(); return; }
     if (e.key === "Escape" && app.painting) { app.cancelBrush(); return; }
+    if (app.gradientEdit && !mod) {
+      if (e.key === "Escape") { app.cancelGradient(); return; }
+      if (e.key === "Enter") { e.preventDefault(); app.commitGradient(); return; }
+    }
+    if (e.key === "Escape" && app.session.shapeDraft) { app.cancelShape(); return; }
     if (app.painting) return; // a stroke keeps the keyboard until it ends
     if (app.session.tool === "crop" && app.session.cropRect && !mod) {
       if (e.key === "Enter") { e.preventDefault(); app.applyCrop(); return; }
-      if (e.key === "Escape") { app.session.cropRect = null; app.emit(); return; }
+      if (e.key === "Escape") { app.cancelCrop(); return; }
     }
     if (app.session.lassoPath && !mod) {
       if (e.key === "Escape") { app.cancelLasso(); return; }
@@ -1790,6 +1862,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       app.emit();
       return;
     }
+    if (mod && !e.altKey && (e.key === "=" || e.key === "+")) { e.preventDefault(); app.zoomKeyboard(canvas, 1); return; }
+    if (mod && !e.altKey && !e.shiftKey && e.key === "-") { e.preventDefault(); app.zoomKeyboard(canvas, -1); return; }
     if (e.key === "Backspace" || e.key === "Delete") {
       e.preventDefault();
       if (e.altKey) app.fillActive();
@@ -1872,13 +1946,18 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   const SHORTCUTS: [string, string][] = [
     ["Undo / Redo", "⌘Z / ⇧⌘Z"], ["New canvas", "⌘N"], ["Open", "⌘O"], ["Save / Save As", "⌘S / ⇧⌘S"],
     ["Export PNG / JPEG", "⇧⌘E / ⌥⇧⌘S"], ["Close document / Quit", "⌘W / ⌘Q"],
-    ["New blank layer", "⇧⌘N"], ["Layer via Copy / Cut", "⌘J / ⇧⌘J"], ["Group / Merge down", "⌘G / ⌘E"],
-    ["Select All / Deselect / Inverse", "⌘A / ⌘D / ⇧⌘I"], ["Copy / Copy Merged / Paste", "⌘C / ⇧⌘C / ⌘V"],
-    ["Invert pixels", "⌘I"], ["Free Transform", "⌘T"], ["Fit on screen / 100 %", "⌘0 / ⌘1"],
-    ["Fill with foreground / Clear", "⌥⌫ / ⌫"], ["Nudge (×10 with Shift)", "Arrows"],
-    ["Tools", "V M L W C B E S R J G U T I H Z"], ["Swap / reset colours", "X / D"],
-    ["Brush size / hardness", "[ ] / ⇧[ ]"], ["Pan with any tool", "Space"],
-    ["Add / subtract selection", "Shift / Alt + click"], ["Straight brush line", "Shift + click"],
+    ["New blank layer", "⇧⌘N"], ["Duplicate / Layer via Copy / Cut", "⌘J / ⇧⌘J"], ["Group / Merge down", "⌘G / ⌘E"],
+    ["Move layer up / down", "⌘] / ⌘["], ["Layer opacity (two digits for exact)", "1–0"],
+    ["Select All / Deselect / Inverse", "⌘A / ⌘D / ⇧⌘I"], ["Cut / Copy / Copy Merged / Paste", "⌘X / ⌘C / ⇧⌘C / ⌘V"],
+    ["Invert pixels", "⌘I"], ["Transform Layer / Selection", "⌘T"], ["Show transform controls", "⌘H"],
+    ["Fit / Actual pixels / Zoom in / out", "⌘0 / ⌘1 / ⌘= / ⌘-"],
+    ["Fill with foreground / background", "⌥⌫ / ⌘⌫"], ["Delete selection pixels / layer / lasso corner", "⌫"],
+    ["Nudge layer or selection (×10 with Shift)", "Arrows"], ["Move selected pixels", "⌘ + Arrows"],
+    ["Apply / Cancel the current operation", "⏎ / ⎋"], ["Cycle the tool's mode", "Tab"], ["No tool", "A"],
+    ["Tools", "V M L W C B E J S R G U T I H Z"], ["Swap / reset colours", "X / D"],
+    ["Brush size / hardness", "[ ] / ⇧[ ]"], ["Resize the tip / hardness", "Right-drag / ⇧ right-drag"], ["Pan with any tool", "Space"],
+    ["Add / subtract selection", "Shift / Alt + click"], ["Straight brush line / axis lock", "Shift + click / drag"],
+    ["Text tracking / leading while typing", "⌥← → / ⌥↑ ↓"],
   ];
 
   function showShortcuts(): void {
