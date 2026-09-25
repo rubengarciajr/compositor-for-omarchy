@@ -57,7 +57,7 @@ flowchart LR
 - **Adjustment layers** — Hue/Saturation, Levels, Curves, Exposure, Gradient Map, Grain, Noise, Invert, B&W, Color Balance, Gaussian Blur, Motion Blur (each affects everything below it in the stack)
 - **Type** — type directly on the canvas (click to place, click existing text to edit), font family (installed system fonts on request), weight, size, colour, alignment, leading and tracking
 - **Transform** — handles around the selected layer with the Move tool: scale (proportional, Shift free, Alt from centre), rotate by dragging outside a corner, numeric X/Y/W/H/Angle, flips, reset
-- **Tools** — Move, Marquee (rect/ellipse), Lasso (free/polygon), Magic Wand, Crop, Brush, Eraser, Clone Stamp, Blur, Spot Healing, Gradient, Shape, Type, Eyedropper, Hand, Zoom — with Photoshop's modifiers (Space pans, Shift-click lines, Alt samples, Shift/Alt constrain or draw from the centre, Ctrl-click auto-select, Alt-drag duplicate)
+- **Tools** — Move, Marquee (rect/ellipse), Lasso (free/polygon), Magic Wand, Crop, Brush / Eraser (Compositor's stroke engine with Smoothing), Spot Healing (Content-Aware / Create Texture / Proximity Match), Clone Stamp (Aligned, Sample All Layers), Smear (Liquify / Blur / Smudge), Gradient, Shape, Type, Eyedropper, Hand, Zoom — with Photoshop's modifiers (Space pans, Shift-click lines, Alt samples, Shift/Alt constrain or draw from the centre, Ctrl-click auto-select, Alt-drag duplicate)
 - **Add Image** — Layer › Add Image… (or the picture button under the layer list) brings image files in as new layers fitted inside the canvas
 - **Gradient** — Photoshop "Basics" presets (Foreground to Background, Foreground to Transparent, Background to Transparent, Black/White), linear or radial, reverse; painted along the drag on its own new layer, limited to the selection when there is one
 - **Selections** — mask-based with marching ants; Magic Wand, Marquee and Lasso add with `Shift` and subtract with `Alt` (cursor shows + / −); right-click a selection for Layer via Copy / Cut, Layer Mask from Selection, Inverse, Deselect, Fill, Clear; Select menu with `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` / `Ctrl+J` / `Ctrl+Shift+J`
@@ -175,7 +175,7 @@ That installs:
 
 ## Keyboard shortcuts
 
-Tools follow Photoshop: `V M L W C B E S R G U T I H Z`, `X` swaps foreground/background, `D` resets them to black/white, `[` / `]` brush size, `Shift+[` / `]` hardness, arrows nudge (Shift for ×10), `Backspace` clears, `Alt+Backspace` fills with the foreground colour. Paint tools show a circle the size of the brush instead of an arrow.
+Tools follow Photoshop: `V M L W C B E S R G U T I H Z`, `X` swaps foreground/background, `D` resets them to black/white, `[` / `]` brush size, `Shift+[` / `]` hardness, `1`–`0` opacity, Tab cycles a tool's mode, right-drag resizes the tip, arrows nudge (Shift for ×10), `Backspace` clears, `Alt+Backspace` fills with the foreground colour. Paint tools show a circle the size of the brush instead of an arrow.
 
 | Action | Linux | macOS label |
 | --- | --- | --- |
@@ -241,7 +241,6 @@ linux/
 
 - Adjustment layers and effects have no parameter editor yet; they are added with sensible defaults (edit them in code or wait for the inspector).
 - Undo history is one stack shared by all open documents; switching documents starts it afresh. Every step stores a full copy of each layer, so very large documents use a lot of memory.
-- The Blur tool is a soft-retouch approximation, not a true local blur; Clone Stamp samples the flattened image.
 - Import is limited to what Chromium can decode (no HEIC, TIFF or PSD).
 
 ## macOS original

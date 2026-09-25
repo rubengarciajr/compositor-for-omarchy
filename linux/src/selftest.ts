@@ -136,6 +136,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const z = app.session.zoom;
     const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2;
     const oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+    app.setGradient({ preset: "fg-bg", style: "linear", reverse: false, opacity: 1 });
     app.pointerDown(view, fakeDown(ox + 0 * z, oy + 25 * z));
     app.pointerMove(view, fakeDown(ox + 100 * z, oy + 25 * z));
     app.pointerUp(view, fakeDown(ox + 100 * z, oy + 25 * z));
@@ -171,13 +172,13 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     check("gradient radial style spreads from the start point", a[0] < 30 && b[0] > 220, { a, b });
     check("gradient settings are remembered", JSON.parse(localStorage.getItem("compositor.gradient") ?? "{}").style === "radial", localStorage.getItem("compositor.gradient"));
     app.setGradient({ preset: "fg-bg", style: "linear", reverse: false });
-    // Brush with a group active paints on a fresh layer instead of the group.
+    // A folder cannot be painted (only its mask can): the press does nothing, as in the Mac app.
     app.addGroup();
-    const groups = doc.layers.filter((l) => l.kind === "group").length;
+    const layersBefore = doc.layers.length, groupId = app.activeLayer?.id;
     app.setTool("brush");
     app.pointerDown(view, fakeDown(ox + 50 * z, oy + 25 * z));
     app.pointerUp(view, fakeDown(ox + 50 * z, oy + 25 * z));
-    check("brush on a group creates a layer", app.activeLayer?.kind === "raster" && doc.layers.filter((l) => l.kind === "group").length === groups && doc.layers.every((l) => l.kind !== "group" || l.canvas === null), doc.layers.map((l) => `${l.kind}:${l.name}`));
+    check("brush on a folder paints nothing", app.activeLayer?.id === groupId && doc.layers.length === layersBefore && !app.painting, doc.layers.map((l) => `${l.kind}:${l.name}`));
   }
   // Painting on a moved / scaled / pasted layer lands under the pointer (document → layer space).
   {
@@ -306,7 +307,7 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     // Shift-click straight line
     app.addBlankLayer();
     app.session.foreground = "#ff0000";
-    app.session.brush.size = 6; app.session.brush.hardness = 1; app.session.brush.opacity = 1; app.session.brush.flow = 1;
+    app.session.brush.size = 6; app.session.brush.hardness = 1; app.session.brush.opacity = 1;
     app.setTool("brush");
     click(10, 30);
     click(90, 30, { shift: true });
@@ -367,18 +368,63 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     rt.fillStyle = "#000000"; rt.fillRect(0, 0, 30, 40);
     app.emit();
     app.setTool("blur");
-    app.session.brush.size = 16; app.session.brush.opacity = 1; app.session.brush.flow = 1;
+    app.session.smearMode = "blur";
+    app.session.brush.size = 16; app.session.brush.opacity = 1;
     click(30, 20);
     const edge = px(app.activeLayer!.canvas!, 29, 20);
     check("blur tool softens an edge", edge[0] > 20 && edge[0] < 235, edge);
-    rt.fillStyle = "#ffffff"; rt.fillRect(30, 0, 30, 40);
-    rt.fillStyle = "#ff0000"; rt.fillRect(44, 19, 3, 3); // a red mark on white
+    // Smear · Liquify pushes pixels along the drag; Smudge drags colour; Clone Stamp copies from the Alt-clicked source.
+    {
+      const lq = writableLayer(app.activeLayer!)!.getContext("2d")!;
+      lq.clearRect(0, 0, 60, 40); lq.fillStyle = "#000"; lq.fillRect(0, 0, 30, 40);
+      app.emit();
+      app.session.smearMode = "liquify";
+      app.session.brush.size = 20; app.session.brush.hardness = 0.5; app.session.brush.opacity = 1;
+      app.pointerDown(view, ev(28, 20)); app.pointerMove(view, ev(34, 20)); app.pointerMove(view, ev(40, 20)); app.pointerUp(view, ev(40, 20));
+      const pushed = px(app.activeLayer!.canvas!, 34, 20), kept = px(app.activeLayer!.canvas!, 34, 2);
+      check("liquify pushes pixels along the drag", pushed[0] < 100 && pushed[3] === 255 && kept[3] === 0, { pushed, kept });
+      app.session.smearMode = "smudge";
+      app.pointerDown(view, ev(28, 34)); app.pointerMove(view, ev(34, 34)); app.pointerMove(view, ev(44, 34)); app.pointerUp(view, ev(44, 34));
+      const smudged = px(app.activeLayer!.canvas!, 40, 34);
+      check("smudge drags colour along", smudged[0] < 200, smudged);
+    }
+    const rt2 = writableLayer(app.activeLayer!)!.getContext("2d")!; // strokes replace the bitmap (copy-on-write)
+    rt2.fillStyle = "#ffffff"; rt2.fillRect(30, 0, 30, 40);
+    rt2.fillStyle = "#ff0000"; rt2.fillRect(44, 19, 3, 3); // a red mark on white
     app.emit();
     app.setTool("spot-healing");
     app.session.brush.size = 10;
     click(45, 20);
     const healed = px(app.activeLayer!.canvas!, 45, 20);
     check("spot healing fills a mark from its surroundings", healed[0] > 230 && healed[1] > 230 && healed[2] > 230 && healed[3] > 240, healed);
+    {
+      app.newDocument(60, 40, "clone");
+      const cs = writableLayer(app.activeLayer!)!.getContext("2d")!;
+      cs.fillStyle = "#000"; cs.fillRect(5, 5, 10, 10);
+      app.emit();
+      app.setTool("clone-stamp");
+      app.session.brush.size = 10; app.session.brush.hardness = 1; app.session.brush.opacity = 1;
+      app.pointerDown(view, ev(40, 30)); app.pointerUp(view, ev(40, 30)); // no source yet
+      const noSource = app.brushError;
+      app.pointerDown(view, ev(10, 10, { alt: true })); app.pointerUp(view, ev(10, 10, { alt: true })); // Alt-click sets the source
+      app.pointerDown(view, ev(40, 30)); app.pointerMove(view, ev(42, 30)); app.pointerUp(view, ev(42, 30));
+      check("clone stamp copies from the source", !!noSource && px(app.activeLayer!.canvas!, 41, 30)[0] === 0 && px(app.activeLayer!.canvas!, 41, 30)[3] === 255 && px(app.activeLayer!.canvas!, 30, 30)[3] === 255, { noSource, cloned: px(app.activeLayer!.canvas!, 41, 30) });
+      // Spot Healing rebuilds a blemish from its surroundings.
+      app.newDocument(80, 60, "heal");
+      const hc = writableLayer(app.activeLayer!)!.getContext("2d")!;
+      for (let y = 0; y < 60; y += 2) { hc.fillStyle = y % 4 ? "#707070" : "#646464"; hc.fillRect(0, y, 80, 2); }
+      hc.fillStyle = "#ff0000"; hc.fillRect(35, 25, 10, 10);
+      app.commit("Blemish");
+      app.setTool("spot-healing");
+      app.session.brush.size = 24; app.session.brush.hardness = 1; app.session.brush.opacity = 1;
+      for (const mode of ["content-aware", "create-texture", "proximity-match"] as const) {
+        app.session.healMode = mode;
+        app.pointerDown(view, ev(40, 30)); app.pointerUp(view, ev(40, 30));
+        const healed = px(app.activeLayer!.canvas!, 40, 30), far = px(app.activeLayer!.canvas!, 10, 10);
+        check(`spot healing (${mode}) fills from the surroundings`, healed[0] - healed[1] < 30 && healed[1] > 80 && healed[1] < 130 && healed[3] === 255 && far[0] === 0x70, { healed, far });
+        app.undo();
+      }
+    }
     // Move: Ctrl-click picks the top-most layer under the pointer; Alt-drag duplicates
     app.newDocument(60, 40, "movepick");
     const bgId = app.activeLayer!.id;
@@ -561,16 +607,25 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const moved = { ...app.session.cropRect! };
     check("crop handles resize the box and dragging inside moves it", Math.round(drawn.w) === 20 && Math.round(resized.w) === 30 && Math.round(resized.h) === 23 && Math.round(moved.x) === 7 && Math.round(moved.y) === 6 && Math.round(moved.w) === 30, { drawn, resized, moved });
     app.session.cropRect = null;
-    // Brush spacing: 200 % of a 4 px brush leaves gaps between stamps
+    // The stroke engine: opacity caps the whole stroke, Esc restores the layer, paint grows the bitmap.
     app.addBlankLayer();
     app.setTool("brush");
     app.session.foreground = "#ff0000";
-    app.session.brush.size = 4; app.session.brush.hardness = 1; app.session.brush.opacity = 1; app.session.brush.flow = 1; app.session.brush.spacing = 2;
-    app.pointerDown(view, ev(5, 15)); app.pointerMove(view, ev(37, 15)); app.pointerUp(view, ev(37, 15));
-    const c = app.activeLayer!.canvas!;
-    const gap = px(c, 9, 15)[3], stamp = px(c, 13, 15)[3];
-    app.session.brush.spacing = 0.25;
-    check("brush spacing controls the distance between stamps", gap === 0 && stamp > 200, { gap, stamp });
+    app.session.brush.size = 12; app.session.brush.hardness = 1; app.session.brush.opacity = 0.5; app.session.brush.smoothing = 0;
+    app.pointerDown(view, ev(10, 15));
+    for (let i = 0; i < 6; i++) { app.pointerMove(view, ev(30, 15)); app.pointerMove(view, ev(10, 15)); }
+    app.pointerUp(view, ev(10, 15));
+    const capped = px(app.activeLayer!.canvas!, 20, 15);
+    check("stroke opacity caps overlapping passes", Math.abs(capped[3] - 128) <= 3 && capped[0] === 255, capped);
+    app.pointerDown(view, ev(10, 30)); app.pointerMove(view, ev(30, 30));
+    (app as unknown as { cancelBrush(): void }).cancelBrush();
+    check("Esc drops the stroke in progress", px(app.activeLayer!.canvas!, 20, 30)[3] === 0, px(app.activeLayer!.canvas!, 20, 30));
+    app.session.brush.opacity = 1;
+    const small = app.activeLayer!;
+    small.canvas = createCanvas(10, 10); small.transform = { x: 20, y: 5, width: 10, height: 10, rotation: 0, flipH: false, flipV: false };
+    app.pointerDown(view, ev(30, 20)); app.pointerMove(view, ev(36, 20)); app.pointerUp(view, ev(36, 20));
+    const grown = app.activeLayer!;
+    check("painting outside a layer grows it to the paint", grown.canvas!.width > 10 && Math.round(grown.transform.x + grown.transform.width) === 40 && grown.transform.y + grown.transform.height >= 26 && px(flattenDocument(app.doc!), 33, 20)[0] === 255 && px(flattenDocument(app.doc!), 33, 20)[3] === 255, { w: grown.canvas!.width, t: grown.transform, flat: px(flattenDocument(app.doc!), 33, 20) });
   }
   // History is copy-on-write: unchanged bitmaps are shared between entries, edits never
   // reach into an entry, and brush strokes composite incrementally around the painted layer.
@@ -839,11 +894,16 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
   {
     check("paint tools hide the arrow", cursorForTool({ tool: "brush", shift: false, alt: false, dragging: false }) === "none" && cursorForTool({ tool: "clone-stamp", shift: false, alt: true, dragging: false }) === "crosshair", null);
     check("tool cursors", cursorForTool({ tool: "zoom", shift: true, alt: false, dragging: false }).startsWith("url(") && cursorForTool({ tool: "zoom", shift: true, alt: false, dragging: false }) !== cursorForTool({ tool: "zoom", shift: false, alt: false, dragging: false }) && cursorForTool({ tool: "hand", shift: false, alt: false, dragging: true }) === "grabbing" && cursorForTool({ tool: "type", shift: false, alt: false, dragging: false }) === "text" && cursorForTool({ tool: "eyedropper", shift: false, alt: false, dragging: false }).startsWith("url("), null);
+    app.setTool("brush");
     app.session.brush.size = 24;
-    app.adjustBrush(1); app.adjustBrush(1);
+    app.adjustBrush(1); app.adjustBrush(1); // ×1.2 steps: 24 → 29 → 35
     const grown = app.session.brush.size;
     app.adjustBrush(-1);
-    check("bracket keys resize the brush", grown === 44 && app.session.brush.size === 34, { grown, now: app.session.brush.size });
+    app.session.brush.hardness = 0.8;
+    app.adjustBrush(1, true); const hardUp = app.session.brush.hardness;
+    app.session.brush.hardness = 0.8;
+    app.adjustBrush(-1, true);
+    check("bracket keys resize the brush", grown === 35 && app.session.brush.size === 29 && hardUp === 1 && app.session.brush.hardness === 0.75, { grown, now: app.session.brush.size, hardUp, hardDown: app.session.brush.hardness });
   }
   // View › Theme: three choices, applied live and remembered.
   {

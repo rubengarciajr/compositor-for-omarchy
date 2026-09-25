@@ -57,7 +57,7 @@ export type EffectKind = "stroke" | "drop-shadow" | "color-overlay" | "inner-sha
 
 export type ToolId =
   | "idle" | "move" | "marquee" | "lasso" | "wand" | "crop"
-  | "brush" | "eraser" | "spot-healing" | "clone-stamp" | "blur"
+  | "brush" | "spot-healing" | "clone-stamp" | "blur"
   | "gradient" | "shape" | "type" | "eyedropper" | "hand" | "zoom";
 
 export type MarqueeShape = "rect" | "ellipse";
@@ -188,20 +188,36 @@ export interface DocumentState {
   diskState?: string | null;
 }
 
+/** The brush tip shared by Brush, Spot Healing, Clone Stamp and Smear (Compositor's BrushSettings). */
 export interface BrushSettings {
+  /** Diameter in document pixels, 1…2000. */
   size: number;
+  /** 0 = fully soft, 1 = hard-edged. */
   hardness: number;
+  /** Caps the whole stroke, 0.01…1 ("Strength" for Smear). */
   opacity: number;
-  flow: number;
-  /** Distance between stamps as a fraction of the brush size (Photoshop "Spacing"). */
-  spacing: number;
+  /** 0–100: the brush trails the pointer on a string this long (screen points). Brush only. */
   smoothing: number;
-  erase: boolean;
 }
+
+export type BrushMode = "paint" | "erase";
+export type SmearMode = "liquify" | "blur" | "smudge";
+export type HealMode = "content-aware" | "create-texture" | "proximity-match";
 
 export interface SessionState {
   tool: ToolId;
   brush: BrushSettings;
+  /** Brush tool: paint with the foreground colour (B) or erase (E). */
+  brushMode: BrushMode;
+  /** Smear tool: Liquify pushes pixels, Blur softens, Smudge drags colour along. */
+  smearMode: SmearMode;
+  /** Spot Healing type. */
+  healMode: HealMode;
+  clone: { aligned: boolean; sampleAll: boolean };
+  /** The active layer's mask is the paint target (its thumbnail was clicked). */
+  maskSelected: boolean;
+  /** On a mask: paint white (reveal) instead of black (hide). */
+  maskPaintWhite: boolean;
   foreground: string;
   background: string;
   marqueeShape: MarqueeShape;

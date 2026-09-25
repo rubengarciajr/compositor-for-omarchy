@@ -1,5 +1,5 @@
 import type {
-  BrushSettings,
+  BrushMode,
   DocumentState,
   Layer,
   LayerEffect,
@@ -22,7 +22,7 @@ import {
   parentOf,
   uid,
 } from "./model";
-import { History, snapshot, writableLayer } from "./history";
+import { History, snapshot, writableLayer, writableMask } from "./history";
 
 /** The crop box as an (unrotated) transform, so the Move tool's handle maths applies to it. */
 function cropTransform(r: { x: number; y: number; w: number; h: number }): Transform {
@@ -51,14 +51,16 @@ import {
   invertImage,
   imageDataOf,
   colorSelect,
-  blurSpot,
-  healSpot,
   maskBounds,
-  stampBrush,
   canvasFromImageData,
+  parseHex,
 } from "./pixels";
+import { BrushStroke, WarpStroke, layerInDocument } from "./stroke";
+import type { StrokeMode, StrokeOptions, StrokeTip } from "./stroke";
+import { spotHeal } from "./heal";
 import { flattenDocument, flattenDocumentCopy, fitZoom, screenToDoc, ensureLayerBitmap, setEditingLayer, beginStroke, endStroke } from "../render/compositor";
 import { toLocal } from "./transform";
+import { enterDocSpace } from "./stroke";
 import { fitTextLayer, textNaturalSize, textScale } from "./pixels";
 import { loadGradientSettings, paintGradient, saveGradientSettings } from "./gradient";
 import type { GradientSettings } from "./gradient";
@@ -76,11 +78,32 @@ export class App {
   onExternalChange: (doc: DocumentState) => Promise<"revert" | "keep"> = async () => "revert";
   /** Canvas-only refresh (no panel rebuild) — used while typing or dragging a live control. */
   onDraw: () => void = () => {};
-  private strokePrev: { x: number; y: number } | null = null;
-  private cloneSource: { x: number; y: number } | null = null;
+  /** Brush stroke in progress (Brush, Spot Healing, Clone Stamp, Smear · Blur). */
+  private stroke: BrushStroke | null = null;
+  /** Liquify / Smudge stroke in progress. */
+  private warp: WarpStroke | null = null;
+  /** Clone Stamp: Option-clicked source, and the source→pointer offset of the current alignment. */
+  cloneSource: { x: number; y: number } | null = null;
+  private cloneOffset: { x: number; y: number } | null = null;
+  /** Where the brush string is anchored (Smoothing) and where the pointer is. */
+  private brushAnchor: { x: number; y: number } | null = null;
+  private brushPointer: { x: number; y: number } | null = null;
+  /** Shift while painting locks the stroke to an axis from where Shift went down. */
+  private brushAxisAnchor: { x: number; y: number } | null = null;
+  private brushAxisHorizontal: boolean | null = null;
+  private brushLastPixel: { x: number; y: number } | null = null;
+  /** Last accepted paint sample: Shift-click continues from here with a straight line. */
+  private lastBrushPoint: { point: { x: number; y: number }; layerId: string; mask: boolean } | null = null;
+  /** Brush tips parked per family when switching tools (0 brush/heal, 1 clone, 2 smear). */
+  private parkedTips: Record<number, { size: number; hardness: number; opacity: number }> = { 1: { size: 40, hardness: 0, opacity: 1 }, 2: { size: 40, hardness: 0, opacity: 1 } };
+  private pendingOpacityDigit: { digit: number; time: number } | null = null;
+  /** Right-drag over the canvas resizes the tip (Shift: hardness). */
+  private tipDrag: { x: number; size: number; hardness: number; hardnessShown: boolean; moved: boolean } | null = null;
+  /** Message from the last failed paint action (e.g. no clone source), for the shell to show. */
+  brushError: string | null = null;
   private marqueeStart: { x: number; y: number } | null = null;
   private lassoPoints: [number, number][] = [];
-  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "scale" | "rotate" = "none";
+  private dragMode: "none" | "pan" | "move" | "crop" | "crop-handle" | "crop-move" | "marquee" | "brush" | "tip" | "scale" | "rotate" = "none";
   private moveStart: { x: number; y: number } | null = null;
   private transformStart: Transform | null = null;
   private transformHandle: HandleSpec | null = null;
@@ -94,7 +117,13 @@ export class App {
     setInterval(() => void this.checkExternalChanges(), App.WATCH_INTERVAL);
     this.session = {
       tool: "move",
-      brush: { size: 24, hardness: 0.6, opacity: 1, flow: 1, spacing: 0.25, smoothing: 0.2, erase: false },
+      brush: { size: 40, hardness: 1, opacity: 1, smoothing: 0 },
+      brushMode: "paint",
+      smearMode: "liquify",
+      healMode: "content-aware",
+      clone: { aligned: true, sampleAll: false },
+      maskSelected: false,
+      maskPaintWhite: false,
       foreground: "#000000",
       background: "#ffffff",
       marqueeShape: "rect",
@@ -152,8 +181,6 @@ export class App {
 
   /** Space is held: any tool pans, like Photoshop's temporary Hand. */
   tempHand = false;
-  /** Where the last paint stroke ended; Shift-click continues from here with a straight line. */
-  private lastStrokeEnd: { x: number; y: number } | null = null;
   private moveOrigin: { x: number; y: number } | null = null;
   private moveApplied = { x: 0, y: 0 };
   private downMode: Selection["mode"] = "replace";
@@ -638,9 +665,11 @@ export class App {
   }
 
   /** Panel click: plain selects, `toggle` (Ctrl) adds/removes, `range` (Shift) extends from the active layer. */
-  selectLayer(id: string, opts: { toggle?: boolean; range?: boolean } = {}): void {
+  selectLayer(id: string, opts: { toggle?: boolean; range?: boolean; mask?: boolean } = {}): void {
     const doc = this.doc;
     if (!doc) return;
+    if (id !== this.session.activeLayerId || !opts.mask) this.session.maskSelected = false;
+    if (opts.mask) this.session.maskSelected = true;
     const sel = new Set(this.session.selectedLayerIds);
     if (opts.range && this.session.activeLayerId) {
       const rows = layerTree(doc).map((r) => r.layer.id);
@@ -877,15 +906,83 @@ export class App {
   }
 
   setTool(tool: ToolId): void {
+    if (this.stroke || this.warp) return; // a stroke keeps its tool until it ends
     if (this.session.textEdit && tool !== "type") this.endTextEdit(true);
+    const before = this.session.tool;
+    if (before !== tool) {
+      const from = this.tipFamily(before), to = this.tipFamily(tool);
+      if (from !== to) {
+        const b = this.session.brush;
+        this.parkedTips[from] = { size: b.size, hardness: b.hardness, opacity: b.opacity };
+        const parked = this.parkedTips[to] ?? { size: 40, hardness: 1, opacity: 1 };
+        Object.assign(b, parked);
+      }
+    }
     this.session.tool = tool;
     if (tool === "crop" && this.doc?.selection?.mask && !this.session.cropRect) {
       // With a selection, the crop box starts at its bounds (Compositor 1.2.5).
       const b = maskBounds(this.doc.selection.mask);
       if (b) this.session.cropRect = { ...b };
     }
-    if (tool === "eraser") this.session.brush.erase = true;
-    if (tool === "brush") this.session.brush.erase = false;
+    this.emitView();
+  }
+
+  /** Brush, Spot Healing, Clone Stamp and Smear share the tip, size keys and opacity digits. */
+  isBrushTool(tool: ToolId = this.session.tool): boolean {
+    return tool === "brush" || tool === "spot-healing" || tool === "clone-stamp" || tool === "blur";
+  }
+
+  /** Which parked tip a tool uses: Clone Stamp and Smear start soft and keep their own size. */
+  private tipFamily(tool: ToolId): number {
+    return tool === "clone-stamp" ? 1 : tool === "blur" ? 2 : 0;
+  }
+
+  /** B / E: the Brush tool in Paint or Erase mode. */
+  setBrushMode(mode: BrushMode): void {
+    if (this.stroke || this.warp) return;
+    this.session.brushMode = mode;
+    if (this.session.tool !== "brush") this.setTool("brush");
+    else this.emitView();
+  }
+
+  /** Tab: step the mode shown at the left of the current tool's header. */
+  cycleToolMode(): void {
+    if (this.stroke || this.warp) return;
+    const s = this.session;
+    const next = <T,>(all: readonly T[], v: T): T => all[(all.indexOf(v) + 1) % all.length];
+    switch (s.tool) {
+      case "marquee": s.marqueeShape = s.marqueeShape === "rect" ? "ellipse" : "rect"; this.cancelLasso(); break;
+      case "lasso": s.lassoMode = s.lassoMode === "free" ? "polygon" : "free"; this.cancelLasso(); break;
+      case "shape": s.shapeKind = next(["rect", "ellipse", "line"] as const, s.shapeKind === "rounded" ? "rect" : s.shapeKind); break;
+      case "brush": s.brushMode = s.brushMode === "paint" ? "erase" : "paint"; break;
+      case "blur": s.smearMode = next(["liquify", "blur", "smudge"] as const, s.smearMode); break;
+      case "spot-healing": s.healMode = next(["content-aware", "create-texture", "proximity-match"] as const, s.healMode); break;
+      case "clone-stamp": s.clone.sampleAll = !s.clone.sampleAll; break;
+      case "gradient": this.setGradient({ style: s.gradient.style === "linear" ? "radial" : "linear" }); return;
+      default: return;
+    }
+    this.emitView();
+  }
+
+  /** 1–9 = 10–90 %, 0 = 100 %; two digits within 0.6 s give an exact value (4, 5 → 45 %). */
+  typeOpacityDigit(digit: number, time = performance.now() / 1000): void {
+    const tool = this.session.tool;
+    if (!(this.isBrushTool(tool) || tool === "gradient" || tool === "move") || this.stroke || this.warp || digit < 0 || digit > 9) return;
+    let percent = digit === 0 ? 100 : digit * 10;
+    const pending = this.pendingOpacityDigit;
+    if (pending && time - pending.time < 0.6) {
+      percent = Math.max(1, pending.digit * 10 + digit);
+      this.pendingOpacityDigit = null;
+    } else this.pendingOpacityDigit = { digit, time };
+    if (tool === "move") {
+      const layer = this.activeLayer;
+      if (!layer) return;
+      layer.opacity = percent / 100;
+      this.commit("Layer opacity");
+      return;
+    }
+    if (tool === "gradient") { this.setGradient({ opacity: percent / 100 }); return; }
+    this.session.brush.opacity = percent / 100;
     this.emitView();
   }
 
@@ -901,11 +998,26 @@ export class App {
     if (this.history.redo(doc)) this.emit();
   }
 
+  /** Fill the selection (or the whole layer) with a colour; on a mask, black hides and white reveals. */
   fillActive(color = this.session.foreground): void {
     const doc = this.doc;
-    const layer = this.paintableLayer();
-    if (!doc || !layer || !layer.canvas) return;
-    ensureLayerBitmap(layer);
+    const target = this.paintTarget();
+    if (!doc || !target) return;
+    const { layer, mask } = target;
+    if (mask) {
+      const white = color.toLowerCase() === "#ffffff" || (this.session.maskSelected && this.session.maskPaintWhite && color === this.session.foreground);
+      const mctx = writableMask(layer)!.getContext("2d")!;
+      mctx.save();
+      if (doc.selection?.mask) { mctx.beginPath(); }
+      mctx.globalCompositeOperation = white ? "source-over" : "destination-out";
+      mctx.fillStyle = "#fff";
+      if (doc.selection?.mask) mctx.drawImage(doc.selection.mask, 0, 0);
+      else mctx.fillRect(0, 0, doc.width, doc.height);
+      mctx.restore();
+      this.commit("Fill Mask");
+      return;
+    }
+    if (!layer.canvas) return;
     // Paint in document space so the fill respects the layer's transform and the selection.
     const fill = createCanvas(doc.width, doc.height);
     const fctx = fill.getContext("2d")!;
@@ -916,7 +1028,7 @@ export class App {
       fctx.drawImage(doc.selection.mask, 0, 0);
     }
     const ctx = writableLayer(layer)!.getContext("2d")!;
-    this.enterDocSpace(ctx, layer);
+    enterDocSpace(ctx, layer);
     ctx.drawImage(fill, 0, 0);
     ctx.restore();
     this.commit("Fill");
@@ -939,7 +1051,7 @@ export class App {
     const mask = this.doc?.selection?.mask;
     if (!mask || !layer.canvas) return;
     const ctx = writableLayer(layer)!.getContext("2d")!;
-    this.enterDocSpace(ctx, layer);
+    enterDocSpace(ctx, layer);
     ctx.globalCompositeOperation = "destination-out";
     ctx.drawImage(mask, 0, 0);
     ctx.restore();
@@ -1266,18 +1378,33 @@ export class App {
       return;
     }
 
-    if (tool === "brush" || tool === "eraser" || tool === "blur" || tool === "clone-stamp" || tool === "spot-healing") {
-      if (e.altKey && (tool === "brush" || tool === "eraser")) {
-        // Alt with a paint tool samples a colour, like Photoshop's temporary Eyedropper.
+    if (this.isBrushTool(tool)) {
+      if (e.button === 2) {
+        // Right-drag resizes the tip (Shift: hardness); a plain right-click still opens the menu.
+        if (this.stroke || this.warp) return;
+        const b = this.session.brush;
+        this.tipDrag = { x: e.clientX, size: b.size, hardness: b.hardness, hardnessShown: e.shiftKey, moved: false };
+        this.dragMode = "tip";
+        return;
+      }
+      if (e.altKey && (tool === "brush" || tool === "spot-healing")) {
+        // Option with a paint tool samples a colour, like Photoshop's temporary Eyedropper.
         this.sampleColor(p, false);
         return;
       }
+      if (tool === "clone-stamp" && e.altKey) {
+        this.setCloneSource(p);
+        this.emitView();
+        return;
+      }
+      const from = e.shiftKey ? this.shiftLineStart() : null;
+      if (from) { this.beginBrush(from); this.continueBrush(p); }
+      else this.beginBrush(p);
+      if (!this.stroke && !this.warp) { this.emitView(); return; }
+      this.brushAxisAnchor = e.shiftKey ? p : null;
+      this.brushAxisHorizontal = null;
+      this.brushLastPixel = p;
       this.dragMode = "brush";
-      // Shift-click: a straight stroke from where the last one ended.
-      this.strokePrev = e.shiftKey && this.lastStrokeEnd ? this.lastStrokeEnd : p;
-      this.paintAt(p, e.altKey); // may create the layer to paint on
-      const target = this.activeLayer;
-      if (target) beginStroke(doc, target.id);
       this.redraw();
       return;
     }
@@ -1401,8 +1528,37 @@ export class App {
       this.emitView();
       return;
     }
+    if (this.dragMode === "tip" && this.tipDrag) {
+      const d = this.tipDrag, b = this.session.brush;
+      const dx = e.clientX - d.x;
+      if (Math.abs(dx) >= 3) d.moved = true;
+      if (e.shiftKey) {
+        d.hardnessShown = true;
+        b.hardness = Math.min(1, Math.max(0, d.hardness + dx / 200)); // the full range across 200 points
+        b.size = d.size;
+      } else {
+        d.hardnessShown = false;
+        b.hardness = d.hardness;
+        b.size = Math.min(2000, Math.max(1, Math.round(d.size + (2 * dx) / (this.session.zoom || 1)))); // the rim follows the pointer
+      }
+      this.emitView();
+      return;
+    }
     if (this.dragMode === "brush") {
-      this.paintAt(p, e.altKey);
+      let pixel = p;
+      if (e.shiftKey) {
+        const anchor = this.brushAxisAnchor ?? this.brushLastPixel ?? p; // pressing Shift mid-stroke locks from here
+        if (!this.brushAxisAnchor) { this.brushAxisAnchor = anchor; this.brushAxisHorizontal = null; }
+        if (this.brushAxisHorizontal === null && Math.hypot(p.x - anchor.x, p.y - anchor.y) >= 3) {
+          this.brushAxisHorizontal = Math.abs(p.x - anchor.x) >= Math.abs(p.y - anchor.y);
+        }
+        pixel = this.brushAxisHorizontal === null ? anchor : this.brushAxisHorizontal ? { x: p.x, y: anchor.y } : { x: anchor.x, y: p.y };
+      } else {
+        this.brushAxisAnchor = null;
+        this.brushAxisHorizontal = null;
+      }
+      this.brushLastPixel = p;
+      this.continueBrush(pixel);
       this.redraw();
       return;
     }
@@ -1520,11 +1676,17 @@ export class App {
     const doc = this.doc;
     if (!doc) return;
 
+    if (this.dragMode === "tip") {
+      this.dragMode = "none";
+      this.tipDrag = null;
+      this.emitView();
+      return;
+    }
     if (this.dragMode === "brush") {
-      this.lastStrokeEnd = this.strokePrev;
-      this.strokePrev = null;
-      endStroke();
-      this.commit("Paint");
+      this.dragMode = "none";
+      this.continueBrush(this.brushPointer ?? screenToDoc(_view, doc, this.session, e.clientX, e.clientY));
+      this.finishBrush();
+      return;
     } else if (this.dragMode === "move") {
       this.commit("Move layer");
     } else if (this.dragMode === "scale" || this.dragMode === "rotate") {
@@ -1644,105 +1806,208 @@ export class App {
     return layer;
   }
 
-  /**
-   * Paint tools need a raster layer. When the active layer is a group, adjustment,
-   * text or shape (or there is none), a new blank layer is created for the stroke.
-   */
-  private paintableLayer(): Layer | null {
-    const doc = this.doc;
-    if (!doc) return null;
-    const active = this.activeLayer;
-    if (active?.kind === "raster") return active;
-    return this.insertLayerAboveActive(createBlankLayer(doc, `Layer ${doc.layers.filter((l) => l.name.startsWith("Layer")).length + 1}`));
+  /** True while a brush, heal, clone, blur, liquify or smudge stroke is in progress. */
+  get painting(): boolean {
+    return !!this.stroke || !!this.warp;
   }
 
-  /**
-   * Make `ctx` (a layer bitmap) accept document coordinates: the inverse of the layer's
-   * transform (position, size vs. bitmap size, rotation, flips). Without this, painting on a
-   * moved, scaled or pasted layer lands away from the pointer.
-   */
-  private enterDocSpace(ctx: CanvasRenderingContext2D, layer: Layer): void {
-    const t = layer.transform;
-    const cw = ctx.canvas.width, ch = ctx.canvas.height;
-    const sx = t.width / Math.max(1, cw), sy = t.height / Math.max(1, ch);
-    ctx.save();
-    ctx.scale(1 / sx, 1 / sy);
-    ctx.translate(t.width / 2, t.height / 2);
-    ctx.scale(t.flipH ? -1 : 1, t.flipV ? -1 : 1);
-    ctx.rotate((-t.rotation * Math.PI) / 180);
-    ctx.translate(-(t.x + t.width / 2), -(t.y + t.height / 2));
+  /** True once a right-drag has resized the tip (so the pointer-up must not open the menu). */
+  get tipDragMoved(): boolean {
+    return !!this.tipDrag?.moved;
   }
 
-  private paintAt(p: { x: number; y: number }, altKey: boolean): void {
-    const doc = this.doc;
-    const layer = this.paintableLayer();
-    if (!doc || !layer) return;
+  /** Whether the right-drag tip preview should show the hardness ring. */
+  get tipHardnessShown(): boolean {
+    return !!this.tipDrag?.hardnessShown;
+  }
 
-    if (this.session.tool === "clone-stamp") {
-      if (altKey) {
-        this.cloneSource = { ...p };
-        return;
-      }
-      if (!this.cloneSource || !layer.canvas) return;
-      ensureLayerBitmap(layer);
-      const ctx = writableLayer(layer)!.getContext("2d")!;
-      const src = flattenDocument(doc);
-      const b = this.session.brush;
-      const sx = this.cloneSource.x + (p.x - (this.strokePrev?.x ?? p.x));
-      const sy = this.cloneSource.y + (p.y - (this.strokePrev?.y ?? p.y));
-      this.enterDocSpace(ctx, layer);
-      ctx.globalAlpha = b.opacity;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, b.size / 2, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(src, this.strokePrev ? p.x - this.strokePrev.x : 0, this.strokePrev ? p.y - this.strokePrev.y : 0);
-      // sample from source point
-      ctx.drawImage(src, sx - p.x, sy - p.y);
-      ctx.restore();
-      this.strokePrev = p;
-      return;
+  /** The layer (or its mask) a stroke may paint, following Compositor's `canPaint`. */
+  private paintTarget(): { layer: Layer; mask: boolean } | null {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    if (!doc || !layer || this.session.selectedLayerIds.length > 1) return null;
+    if (doc.selection?.mask && !maskBounds(doc.selection.mask)) return null; // an explicitly empty selection paints nothing
+    for (let l: Layer | undefined = layer; l; l = l.parentId ? doc.layers.find((x) => x.id === l!.parentId) : undefined) if (!l.visible) return null;
+    if (this.session.maskSelected) {
+      if (!layer.mask?.enabled) return null;
+      if (this.session.tool === "spot-healing" || this.session.tool === "clone-stamp") return null; // they rework image pixels
+      if (this.session.tool === "blur" && this.session.smearMode !== "blur") return null;
+      return { layer, mask: true };
     }
-
+    if (layer.kind === "group" || layer.kind === "adjustment") return null;
+    if (layer.kind === "text" || layer.kind === "shape") {
+      // Painting on type or a shape rasterises it, as the Mac app does.
+      flattenDocument(doc); // brings the vector bitmap up to date
+      layer.kind = "raster";
+      layer.text = undefined;
+      layer.shape = undefined;
+    }
     ensureLayerBitmap(layer);
-    const ctx = writableLayer(layer)!.getContext("2d")!;
-    const b: BrushSettings = this.session.brush;
-    const erase = this.session.tool === "eraser" || b.erase;
+    return { layer, mask: false };
+  }
 
-    if (this.session.tool === "blur" || this.session.tool === "spot-healing") {
-      // Retouch tools work in the layer's own pixels around the pointer.
-      const steps = this.strokePrev ? Math.max(1, Math.ceil(Math.hypot(p.x - this.strokePrev.x, p.y - this.strokePrev.y) / Math.max(1, b.size * 0.5))) : 1;
-      for (let i = 1; i <= steps; i++) {
-        const dp = this.strokePrev ? { x: this.strokePrev.x + ((p.x - this.strokePrev.x) * i) / steps, y: this.strokePrev.y + ((p.y - this.strokePrev.y) * i) / steps } : p;
-        const q = this.layerPixel(layer, dp);
-        if (!q) continue;
-        const r = Math.max(1, (b.size / 2) * q.scale);
-        if (this.session.tool === "blur") blurSpot(ctx, q.x, q.y, r, b.opacity * b.flow);
-        else healSpot(ctx, q.x, q.y, r);
-      }
-      this.strokePrev = p;
+  /** Option-click with the Clone Stamp: where to copy from. A new source starts a new alignment. */
+  setCloneSource(p: { x: number; y: number }): void {
+    if (!isFinite(p.x) || !isFinite(p.y)) return;
+    this.cloneSource = { ...p };
+    this.cloneOffset = null;
+  }
+
+  /** Where the Clone Stamp's crosshair sits for a pointer position. */
+  cloneSamplePoint(p: { x: number; y: number }): { x: number; y: number } | null {
+    if (!this.cloneSource) return null;
+    if (!this.cloneOffset || !(this.session.clone.aligned || this.stroke)) return this.cloneSource;
+    return { x: p.x + this.cloneOffset.x, y: p.y + this.cloneOffset.y };
+  }
+
+  private shiftLineStart(): { x: number; y: number } | null {
+    const last = this.lastBrushPoint;
+    if (!last || last.layerId !== this.session.activeLayerId || last.mask !== this.session.maskSelected) return null;
+    return last.point;
+  }
+
+  private beginBrush(p: { x: number; y: number }): void {
+    const doc = this.doc;
+    if (!doc || this.stroke || this.warp) return;
+    const tool = this.session.tool;
+    const s = this.session;
+    if (tool === "blur" && s.smearMode !== "blur") {
+      const target = this.paintTarget();
+      if (!target) return;
+      if (target.mask) { this.brushError = "Smudge and Liquify work on a layer's pixels, not its mask."; return; }
+      this.warp = new WarpStroke(doc, target.layer, this.tip(), s.smearMode);
+      this.warp.append(p);
+      this.brushPointer = p;
+      beginStroke(doc, target.layer.id);
       return;
     }
-    this.enterDocSpace(ctx, layer);
-
-    if (this.strokePrev) {
-      const dx = p.x - this.strokePrev.x;
-      const dy = p.y - this.strokePrev.y;
-      const dist = Math.hypot(dx, dy);
-      const steps = Math.max(1, Math.ceil(dist / Math.max(1, b.size * b.spacing)));
-      for (let i = 1; i <= steps; i++) {
-        const x = this.strokePrev.x + (dx * i) / steps;
-        const y = this.strokePrev.y + (dy * i) / steps;
-        stampBrush(ctx, x, y, b.size, b.hardness, this.session.foreground, b.opacity * b.flow, erase);
-      }
-    } else {
-      stampBrush(ctx, p.x, p.y, b.size, b.hardness, this.session.foreground, b.opacity * b.flow, erase);
+    if (tool === "clone-stamp" && !this.cloneSource) {
+      this.brushError = "Option-click where Clone Stamp should copy from first.";
+      return;
     }
-    ctx.restore();
-    this.strokePrev = p;
+    const target = this.paintTarget();
+    if (!target) return;
+    const { layer, mask } = target;
+    const selection = doc.selection?.mask ?? null;
+    let mode: StrokeMode;
+    const opts: StrokeOptions = { selection };
+    if (mask) mode = s.maskPaintWhite ? "mask-reveal" : "mask-hide";
+    else if (tool === "brush") mode = s.brushMode === "erase" ? "erase" : "paint";
+    else if (tool === "spot-healing") mode = "heal";
+    else mode = "clone";
+    if (mode === "paint") opts.color = parseHex(s.foreground);
+    if (tool === "clone-stamp") {
+      if (s.clone.aligned && this.cloneOffset) { /* keep the alignment from the first stroke */ }
+      else this.cloneOffset = { x: Math.round(this.cloneSource!.x - p.x), y: Math.round(this.cloneSource!.y - p.y) };
+      opts.sample = s.clone.sampleAll ? flattenDocumentCopy(doc) : layerInDocument(doc, layer);
+      opts.sampleOffset = { ...this.cloneOffset };
+    } else if (tool === "blur") {
+      const sigma = Math.min(30, Math.max(1.5, s.brush.size / 10));
+      opts.sample = gaussianBlur(mask ? layer.mask!.canvas : layerInDocument(doc, layer), sigma);
+      if (mask) mode = "clone"; // blurring a mask copies the softened mask back through the tip
+    }
+    this.stroke = new BrushStroke(doc, layer, this.tip(), mode, opts);
+    this.brushAnchor = p;
+    this.brushPointer = p;
+    this.stroke.append(p);
+    this.lastBrushPoint = { point: p, layerId: layer.id, mask };
+    beginStroke(doc, layer.id);
+  }
+
+  private tip(): StrokeTip {
+    const b = this.session.brush;
+    return { diameter: b.size, hardness: b.hardness, opacity: b.opacity };
+  }
+
+  /** Smoothing: the brush is dragged only when the pointer pulls its string taut. */
+  private smoothed(p: { x: number; y: number }): { x: number; y: number } | null {
+    const b = this.session.brush;
+    if (this.session.tool !== "brush" || b.smoothing <= 0 || !this.brushAnchor) return p;
+    const radius = b.smoothing / Math.max(0.01, this.session.zoom || 1);
+    const dx = p.x - this.brushAnchor.x, dy = p.y - this.brushAnchor.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= radius) return null;
+    const step = (dist - radius) / dist;
+    this.brushAnchor = { x: this.brushAnchor.x + dx * step, y: this.brushAnchor.y + dy * step };
+    return this.brushAnchor;
+  }
+
+  private continueBrush(p: { x: number; y: number }): void {
+    this.brushPointer = p;
+    if (this.warp) { this.warp.append(p); return; }
+    const stroke = this.stroke;
+    if (!stroke) return;
+    const q = this.smoothed(p);
+    if (!q) return;
+    stroke.append(q);
+    if (this.lastBrushPoint) this.lastBrushPoint.point = q;
+  }
+
+  private finishBrush(): void {
+    const doc = this.doc;
+    if (!doc) return;
+    if (this.warp) {
+      const warp = this.warp;
+      this.warp = null;
+      const commit = warp.finish(doc, doc.selection?.mask ?? null);
+      endStroke();
+      if (commit && commit.finish()) this.commit(warp.mode === "liquify" ? "Liquify" : "Smudge");
+      else this.emit();
+      return;
+    }
+    const stroke = this.stroke;
+    if (!stroke) return;
+    this.stroke = null;
+    if (this.brushPointer && this.brushAnchor && (this.brushPointer.x !== this.brushAnchor.x || this.brushPointer.y !== this.brushAnchor.y)) {
+      stroke.append(this.brushPointer); // the stroke ends where the hand did, even with smoothing
+    }
+    if (stroke.mode === "heal") this.healStroke(stroke);
+    const changed = stroke.finish();
+    endStroke();
+    this.brushAnchor = null;
+    if (!changed) { this.emit(); return; }
+    const mask = stroke.mode === "mask-reveal" || stroke.mode === "mask-hide";
+    this.commit(mask ? "Paint Mask" : stroke.mode === "erase" ? "Erase" : stroke.mode === "heal" ? "Spot Healing"
+      : this.session.tool === "blur" ? "Blur" : stroke.mode === "clone" ? "Clone Stamp" : "Brush Stroke");
+  }
+
+  /** Esc: drop the stroke in progress; the layer is exactly as before. */
+  cancelBrush(): void {
+    if (this.warp) { this.warp.cancel(); this.warp = null; }
+    if (this.stroke) { this.stroke.cancel(); this.stroke = null; }
+    this.dragMode = "none";
+    this.brushAnchor = null;
+    endStroke();
+    this.emit();
+  }
+
+  /** Replace the healing wash with pixels rebuilt from the surroundings. */
+  private healStroke(stroke: BrushStroke): void {
+    const doc = this.doc;
+    const layer = this.activeLayer;
+    const painted = stroke.bounds;
+    if (!doc || !layer?.canvas || !painted) return;
+    // Room for the patch search, which looks up to about three spot-widths away.
+    const reach = Math.ceil((Math.max(painted.w, painted.h) + 32) * 3.2);
+    const rx0 = Math.max(0, Math.floor(painted.x - reach)), ry0 = Math.max(0, Math.floor(painted.y - reach));
+    const rx1 = Math.min(doc.width, Math.ceil(painted.x + painted.w + reach)), ry1 = Math.min(doc.height, Math.ceil(painted.y + painted.h + reach));
+    const region = { x: rx0, y: ry0, w: rx1 - rx0, h: ry1 - ry0 };
+    if (region.w <= 0 || region.h <= 0) return;
+    // Heal the layer's original pixels (never the wash), in document space.
+    stroke.cancel();
+    const original = layerInDocument(doc, layer);
+    const img = original.getContext("2d")!.getImageData(region.x, region.y, region.w, region.h);
+    const coverage = stroke.coverageBytes(region);
+    spotHeal(img.data, coverage, region.w, region.h, stroke.tip.opacity, this.session.healMode, (Math.random() * 0xffffffff) >>> 0);
+    // Restore the working bitmap and write the healed pixels through the coverage.
+    writableLayer(layer);
+    stroke.applyResult(img, region);
   }
 
   /** X in Photoshop: exchange foreground and background colours. */
   swapColors(): void {
+    if (this.painting) return;
+    if (this.session.maskSelected) { this.session.maskPaintWhite = !this.session.maskPaintWhite; this.emitView(); return; }
     const { foreground, background } = this.session;
     this.session.foreground = background;
     this.session.background = foreground;
@@ -1751,6 +2016,8 @@ export class App {
 
   /** D in Photoshop: black foreground over white background. */
   resetColors(): void {
+    if (this.painting) return;
+    if (this.session.maskSelected) { this.session.maskPaintWhite = false; this.emitView(); return; }
     this.session.foreground = "#000000";
     this.session.background = "#ffffff";
     this.emitView();
@@ -1758,13 +2025,16 @@ export class App {
 
   /** `[` / `]` change the brush size, `Shift+[` / `]` the hardness — as in Photoshop. */
   adjustBrush(step: 1 | -1, hardness = false): void {
+    if (this.painting) return;
     const b = this.session.brush;
     if (hardness) {
-      b.hardness = Math.min(1, Math.max(0, Math.round((b.hardness + step * 0.25) * 100) / 100));
+      // Photoshop's 25 % steps: 0.8 goes up to 1 and down to 0.75.
+      const quarter = b.hardness * 4;
+      const stepped = step > 0 ? Math.floor(quarter + 0.001) + 1 : Math.ceil(quarter - 0.001) - 1;
+      b.hardness = Math.min(4, Math.max(0, stepped)) / 4;
     } else {
-      // Photoshop steps grow with the size: 1 px below 10, then ~10%.
-      const delta = b.size < 10 ? 1 : b.size < 100 ? 10 : Math.round(b.size * 0.1);
-      b.size = Math.min(2000, Math.max(1, b.size + step * delta));
+      const stepped = step > 0 ? Math.max(b.size + 1, Math.round(b.size * 1.2)) : Math.min(b.size - 1, Math.round(b.size / 1.2));
+      b.size = Math.min(2000, Math.max(1, stepped));
     }
     this.emitView();
   }

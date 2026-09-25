@@ -4,7 +4,7 @@
  */
 import type { ToolId } from "../core/model";
 
-export const PAINT_TOOLS: ToolId[] = ["brush", "eraser", "blur", "clone-stamp", "spot-healing"];
+export const PAINT_TOOLS: ToolId[] = ["brush", "blur", "clone-stamp", "spot-healing"];
 
 const svgCursor = (svg: string, hx: number, hy: number, fallback: string) =>
   `url("data:image/svg+xml;utf8,${encodeURIComponent(svg)}") ${hx} ${hy}, ${fallback}`;
@@ -57,8 +57,8 @@ export function cursorForTool({ tool, shift, alt, dragging, space }: CursorConte
     case "type": return "text";
     case "eyedropper": return EYEDROPPER_CURSOR;
     case "clone-stamp": return alt ? "crosshair" : "none"; // Alt = pick the source point
-    case "brush": case "eraser": return alt ? EYEDROPPER_CURSOR : "none"; // Alt = sample a colour
-    case "blur": case "spot-healing": return "none";
+    case "brush": case "spot-healing": return alt ? EYEDROPPER_CURSOR : "none"; // Alt = sample a colour
+    case "blur": return "none";
     case "wand": return shift ? WAND_ADD_CURSOR : alt ? WAND_SUBTRACT_CURSOR : WAND_CURSOR;
     case "marquee": case "lasso": return shift ? SELECT_ADD_CURSOR : alt ? SELECT_SUBTRACT_CURSOR : "crosshair";
     case "crop": case "gradient": case "shape": return "crosshair";

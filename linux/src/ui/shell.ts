@@ -27,20 +27,19 @@ function keyLabel(mac: string): string {
   return [...mods, key].join("+");
 }
 
+/** The tool rail in Compositor's order; the "no tool" state (A) has no button. */
 const TOOL_META: { id: ToolId; icon: IconName; title: string; key: string }[] = [
-  { id: "idle", icon: "pointer", title: "Select (A)", key: "a" },
   { id: "move", icon: "move", title: "Move / Transform (V)", key: "v" },
   { id: "marquee", icon: "marquee", title: "Marquee (M)", key: "m" },
   { id: "lasso", icon: "lasso", title: "Lasso (L)", key: "l" },
   { id: "wand", icon: "wand", title: "Magic Wand (W)", key: "w" },
   { id: "crop", icon: "crop", title: "Crop (C)", key: "c" },
-  { id: "brush", icon: "brush", title: "Brush (B)", key: "b" },
-  { id: "eraser", icon: "eraser", title: "Eraser (E)", key: "e" },
-  { id: "clone-stamp", icon: "stamp", title: "Clone Stamp (S)", key: "s" },
-  { id: "blur", icon: "droplet", title: "Blur (R)", key: "r" },
-  { id: "spot-healing", icon: "bandage", title: "Spot Healing (J)", key: "j" },
+  { id: "brush", icon: "brush", title: "Brush (B) · Eraser (E)", key: "b" },
+  { id: "spot-healing", icon: "bandage", title: "Spot Healing Brush (J)", key: "j" },
+  { id: "clone-stamp", icon: "stamp", title: "Clone Stamp (S) · Alt-click sets the source", key: "s" },
+  { id: "blur", icon: "droplet", title: "Smear (R)", key: "r" },
   { id: "gradient", icon: "gradient", title: "Gradient (G)", key: "g" },
-  { id: "shape", icon: "shape", title: "Shape (U)", key: "u" },
+  { id: "shape", icon: "shape", title: "Shape (U) · Shift-U switches the shape", key: "u" },
   { id: "type", icon: "type", title: "Type (T)", key: "t" },
   { id: "eyedropper", icon: "pipette", title: "Eyedropper (I)", key: "i" },
   { id: "hand", icon: "hand", title: "Hand (H)", key: "h" },
@@ -413,35 +412,32 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   /** Brush size preview: a circle of the brush diameter at the pointer, readable on any background. */
   function drawBrushPreview(ctx: CanvasRenderingContext2D): void {
     const s = app.session;
-    if (!s.hover || !PAINT_TOOLS.includes(s.tool)) return;
+    if (!s.hover || !PAINT_TOOLS.includes(s.tool) || app.tempHand) return;
+    if (mods.alt && (s.tool === "brush" || s.tool === "spot-healing")) return; // Option = eyedropper
     const z = s.zoom || 1;
-    const r = s.brush.size / 2;
-    ctx.save();
-    ctx.lineWidth = 1 / z;
-    ctx.beginPath();
-    ctx.arc(s.hover.x, s.hover.y, r, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(0,0,0,0.85)";
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(s.hover.x, s.hover.y, r + 1 / z, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(255,255,255,0.9)";
-    ctx.stroke();
-    if (s.brush.hardness < 1 && r * z > 6) {
-      // inner circle marks where the soft edge starts
+    const r = Math.max(0.5 / z, s.brush.size / 2); // never smaller than a pixel on screen
+    const ring = (x: number, y: number, radius: number, dashed = false) => {
       ctx.beginPath();
-      ctx.arc(s.hover.x, s.hover.y, r * s.brush.hardness, 0, Math.PI * 2);
-      ctx.setLineDash([3 / z, 3 / z]);
-      ctx.strokeStyle = "rgba(255,255,255,0.6)";
-      ctx.stroke();
+      ctx.arc(x, y, radius, 0, Math.PI * 2);
+      if (dashed) ctx.setLineDash([4 / z, 3 / z]);
+      ctx.lineWidth = 2.5 / z; ctx.strokeStyle = "#fff"; ctx.stroke();
+      ctx.lineWidth = 1 / z; ctx.strokeStyle = "#000"; ctx.stroke();
       ctx.setLineDash([]);
-    }
-    if (r * z < 4) {
-      // tiny brush: crosshair so the pointer stays visible
-      ctx.strokeStyle = "rgba(255,255,255,0.9)";
-      ctx.beginPath();
-      ctx.moveTo(s.hover.x - 6 / z, s.hover.y); ctx.lineTo(s.hover.x + 6 / z, s.hover.y);
-      ctx.moveTo(s.hover.x, s.hover.y - 6 / z); ctx.lineTo(s.hover.x, s.hover.y + 6 / z);
-      ctx.stroke();
+    };
+    ctx.save();
+    ring(s.hover.x, s.hover.y, r);
+    if (app.tipHardnessShown) ring(s.hover.x, s.hover.y, r * s.brush.hardness, true); // the full-strength core while Shift-right-dragging
+    if (s.tool === "clone-stamp" && !mods.alt) {
+      const src = app.cloneSamplePoint(s.hover);
+      if (src) {
+        const reach = 7 / z;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(src.x - reach, src.y); ctx.lineTo(src.x + reach, src.y);
+        ctx.moveTo(src.x, src.y - reach); ctx.lineTo(src.x, src.y + reach);
+        ctx.lineWidth = 3 / z; ctx.strokeStyle = "#fff"; ctx.stroke();
+        ctx.lineWidth = 1 / z; ctx.strokeStyle = "#000"; ctx.stroke();
+      }
     }
     ctx.restore();
   }
@@ -695,7 +691,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     for (const t of TOOL_META) {
       const b = document.createElement("button");
       b.title = t.title;
-      b.innerHTML = icon(t.icon, 20);
+      b.innerHTML = icon(t.id === "brush" && app.session.brushMode === "erase" ? "eraser" : t.icon, 20);
       b.dataset.key = t.key.toUpperCase();
       b.classList.toggle("active", app.session.tool === t.id);
       b.addEventListener("click", () => app.setTool(t.id));
@@ -726,11 +722,67 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   function renderToolHeader(): void {
     const s = app.session;
     const tool = s.tool;
-    const brushTools = tool === "brush" || tool === "eraser" || tool === "blur" || tool === "clone-stamp" || tool === "spot-healing";
-    const title =
-      TOOL_META.find((t) => t.id === tool)?.title.split(" (")[0] ?? tool;
+    const brushTools = app.isBrushTool(tool);
+    const title = tool === "idle" ? "Select a tool"
+      : tool === "brush" ? (s.brushMode === "erase" ? "Eraser" : "Brush")
+      : tool === "blur" ? "Smear"
+      : tool === "spot-healing" ? "Spot Healing"
+      : tool === "hand" ? "Pan"
+      : TOOL_META.find((t) => t.id === tool)?.title.split(" (")[0] ?? tool;
 
     toolHeader.innerHTML = `<div class="title">${title}</div>`;
+
+    /** Segmented control (Compositor's `.segmented` pickers). */
+    const segmented = <T extends string>(options: { value: T; label: string }[], value: T, on: (v: T) => void, help?: string) => {
+      const seg = document.createElement("div");
+      seg.className = "seg";
+      if (help) seg.title = help;
+      for (const o of options) {
+        const b = document.createElement("button");
+        b.textContent = o.label;
+        b.classList.toggle("active", value === o.value);
+        b.addEventListener("click", () => on(o.value));
+        seg.appendChild(b);
+      }
+      return seg;
+    };
+    /** A number field with optional unit, clamped on input; Up/Down step it (Shift ×10). */
+    const numberField = (value: number, min: number, max: number, step: number, on: (v: number) => void, opts: { unit?: string; width?: number; help?: string; digits?: number } = {}) => {
+      const wrap = document.createElement("div");
+      wrap.className = "num";
+      const i = document.createElement("input");
+      i.type = "number";
+      i.min = String(min); i.max = String(max); i.step = String(step);
+      i.value = String(Math.round(value * 10 ** (opts.digits ?? 0)) / 10 ** (opts.digits ?? 0));
+      i.style.width = `${opts.width ?? 56}px`;
+      if (opts.help) i.title = opts.help;
+      const apply = () => { const v = Number(i.value); if (Number.isFinite(v)) on(Math.min(max, Math.max(min, v))); };
+      i.addEventListener("input", apply);
+      i.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+          e.preventDefault();
+          const v = (Number(i.value) || 0) + (e.key === "ArrowUp" ? 1 : -1) * step * (e.shiftKey ? 10 : 1);
+          i.value = String(Math.min(max, Math.max(min, Math.round(v * 1000) / 1000)));
+          apply();
+        }
+        if (e.key === "Enter" || e.key === "Escape") i.blur();
+      });
+      wrap.append(i);
+      if (opts.unit) { const u = document.createElement("span"); u.className = "unit"; u.textContent = opts.unit; wrap.append(u); }
+      return wrap;
+    };
+    /** Slider plus percent field, as the brush and gradient headers pair them. */
+    const percentControl = (value: number, min: number, on: (v: number) => void, help?: string) => {
+      const wrap = document.createElement("div");
+      wrap.style.display = "flex"; wrap.style.alignItems = "center"; wrap.style.gap = "6px";
+      const slider = document.createElement("input");
+      slider.type = "range"; slider.min = String(min); slider.max = "1"; slider.step = "0.01"; slider.value = String(value);
+      slider.style.width = "100px";
+      const pct = numberField(value * 100, min * 100, 100, 1, (v) => { slider.value = String(v / 100); on(v / 100); }, { unit: "%", width: 54, help });
+      slider.addEventListener("input", () => { const v = Number(slider.value); pct.querySelector("input")!.value = String(Math.round(v * 100)); on(v); });
+      wrap.append(slider, pct);
+      return wrap;
+    };
 
     const field = (label: string, control: HTMLElement) => {
       const f = document.createElement("div");
@@ -821,13 +873,46 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         toolHeader.append(hint);
       }
     } else if (brushTools) {
-      if (tool === "brush") {
+      const b = s.brush;
+      const maskTarget = s.maskSelected && !!app.activeLayer?.mask;
+      if (tool === "brush") toolHeader.append(segmented([{ value: "paint", label: "Paint" }, { value: "erase", label: "Erase" }] as const, s.brushMode, (v) => app.setBrushMode(v), "Paint with the foreground color (B), or erase pixels away (E)"));
+      if (tool === "blur") toolHeader.append(segmented([{ value: "liquify", label: "Liquify" }, { value: "blur", label: "Blur" }, { value: "smudge", label: "Smudge" }] as const, s.smearMode, (v) => { s.smearMode = v; app.emitView(); }, "Liquify pushes pixels · Blur softens · Smudge drags color along"));
+      if (tool === "spot-healing") toolHeader.append(segmented([{ value: "content-aware", label: "Content-Aware" }, { value: "create-texture", label: "Create Texture" }, { value: "proximity-match", label: "Proximity Match" }] as const, s.healMode, (v) => { s.healMode = v; app.emitView(); }));
+      if (tool === "clone-stamp") {
+        const aligned = document.createElement("button");
+        aligned.className = "toggle" + (s.clone.aligned ? " active" : "");
+        aligned.textContent = "Aligned";
+        aligned.title = "Keep the source moving with the brush between strokes; off starts every stroke at the source point";
+        aligned.addEventListener("click", () => { s.clone.aligned = !s.clone.aligned; app.emitView(); });
+        toolHeader.append(aligned);
+        toolHeader.append(field("Sample", segmented([{ value: "layer", label: "This Layer" }, { value: "all", label: "All Layers" }] as const, s.clone.sampleAll ? "all" : "layer", (v) => { s.clone.sampleAll = v === "all"; app.emitView(); }, "Copy from the active layer only, or from every visible layer as shown")));
+      }
+      toolHeader.append(field("Size", numberField(b.size, 1, 2000, 1, (v) => { b.size = v; requestDraw(); }, { unit: "px", width: 56 })));
+      toolHeader.append(field("Hardness", percentControl(b.hardness, 0, (v) => { b.hardness = v; requestDraw(); })));
+      toolHeader.append(field(tool === "blur" ? "Strength" : "Opacity", percentControl(b.opacity, 0.01, (v) => { b.opacity = v; }, "Press 1–9 for 10–90%, 0 for 100%")));
+      if (tool === "brush") toolHeader.append(field("Smoothing", (() => {
+        const wrap = document.createElement("div");
+        wrap.style.display = "flex"; wrap.style.alignItems = "center"; wrap.style.gap = "6px";
+        const slider = document.createElement("input");
+        slider.type = "range"; slider.min = "0"; slider.max = "100"; slider.step = "1"; slider.value = String(b.smoothing); slider.style.width = "100px";
+        const f = numberField(b.smoothing, 0, 100, 1, (v) => { slider.value = String(v); b.smoothing = v; }, { width: 54, help: "The brush trails the pointer on a string this long, so a shaky hand still draws a smooth line" });
+        slider.addEventListener("input", () => { b.smoothing = Number(slider.value); f.querySelector("input")!.value = slider.value; });
+        wrap.append(slider, f);
+        return wrap;
+      })()));
+      if (maskTarget) {
+        const pick = document.createElement("select");
+        pick.innerHTML = `<option value="black">Black · Hide</option><option value="white">White · Reveal</option>`;
+        pick.value = s.maskPaintWhite ? "white" : "black";
+        pick.addEventListener("change", () => { s.maskPaintWhite = pick.value === "white"; app.emitView(); });
+        toolHeader.append(field("Paint", pick));
+      } else if (tool === "brush" || tool === "spot-healing") {
         // The brush colour is the foreground colour; editing it here keeps the well in sync.
         const color = document.createElement("input");
         color.type = "color";
         color.className = "brush-color";
         color.value = s.foreground;
-        color.title = "Brush colour (foreground) · X swaps, D resets";
+        color.title = "Foreground color";
         color.addEventListener("input", () => {
           s.foreground = color.value;
           const well = toolRail.querySelector<HTMLInputElement>(".swatches .fg");
@@ -836,17 +921,14 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         color.addEventListener("change", () => app.emitView());
         toolHeader.append(field("Color", color));
       }
-      toolHeader.append(field("Size", range(s.brush.size, 1, 400, 1, (v) => { s.brush.size = v; })));
-      if (tool !== "spot-healing") toolHeader.append(field("Hardness", range(s.brush.hardness, 0, 1, 0.01, (v) => { s.brush.hardness = v; })));
-      if (tool !== "spot-healing") toolHeader.append(field(tool === "blur" ? "Strength" : "Opacity", range(s.brush.opacity, 0.05, 1, 0.01, (v) => { s.brush.opacity = v; })));
-      if (tool === "brush" || tool === "eraser") toolHeader.append(field("Flow", range(s.brush.flow, 0.05, 1, 0.01, (v) => { s.brush.flow = v; })));
-      if (tool === "brush" || tool === "eraser" || tool === "clone-stamp") toolHeader.append(field("Spacing %", range(Math.round(s.brush.spacing * 100), 1, 200, 1, (v) => { s.brush.spacing = v / 100; })));
       const tip = document.createElement("div");
       tip.className = "hint";
-      tip.textContent = tool === "clone-stamp" ? "Alt-click sets the source · Shift-click draws a straight line · [ ] size"
-        : tool === "spot-healing" ? "Click or paint over a blemish · it fills from the surroundings"
-        : tool === "blur" ? "Paint to soften · Shift-click draws a straight line"
-        : "Shift-click draws a straight line · Alt samples a colour · [ ] size · Space pans";
+      tip.textContent = tool === "clone-stamp" && !app.cloneSource ? "Alt-click to set the source"
+        : maskTarget ? "Mask"
+        : tool === "clone-stamp" ? "Alt-click to set the source · Drag to clone · [ ] size · Shift-[ ] hardness · 1–0 opacity · Space to pan"
+        : tool === "spot-healing" ? "Drag over blemishes to heal · [ ] size · Shift-[ ] hardness · Escape cancel · Space to pan"
+        : tool === "blur" ? `Drag to ${s.smearMode === "liquify" ? "push pixels" : s.smearMode === "blur" ? "soften" : "smudge"} · [ ] size · Shift-[ ] hardness · 1–0 strength · Space to pan`
+        : `Drag to ${s.brushMode === "erase" ? "erase" : "paint"} · [ ] size · Shift-[ ] hardness · 1–0 opacity · Escape cancel · Space to pan`;
       toolHeader.append(tip);
     } else if (tool === "marquee") {
       const sel = document.createElement("select");
@@ -1284,11 +1366,30 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       thumb.className = "thumb adjustment";
       thumb.appendChild(iconEl("sliders", 18));
     }
+    const isActive = layer.id === app.session.activeLayerId;
+    thumb.classList.toggle("target", isActive && !app.session.maskSelected && !!layer.mask);
+    let maskThumb: HTMLElement | null = null;
+    if (layer.mask) {
+      maskThumb = document.createElement("div");
+      maskThumb.className = "thumb mask" + (isActive && app.session.maskSelected ? " target" : "") + (layer.mask.enabled ? "" : " off");
+      const t = document.createElement("canvas");
+      t.width = 40; t.height = 28;
+      const mctx = t.getContext("2d")!;
+      mctx.fillStyle = "#000"; mctx.fillRect(0, 0, 40, 28);
+      mctx.drawImage(layer.mask.canvas, 0, 0, 40, 28); // alpha coverage: opaque = reveal
+      maskThumb.appendChild(t);
+      maskThumb.title = "Layer mask · click to paint it (black hides, white reveals)";
+      maskThumb.addEventListener("click", (e) => { e.stopPropagation(); app.selectLayer(layer.id, { mask: true }); });
+    }
     const name = document.createElement("div");
     name.className = "name";
     name.textContent = layer.name + (layer.blendMode !== "normal" ? ` · ${BLEND_LABELS[layer.blendMode]}` : "");
     name.title = "Double-click to rename";
-    el.append(eye, thumb, name);
+    const thumbs = document.createElement("div");
+    thumbs.className = "thumbs";
+    thumbs.append(thumb);
+    if (maskThumb) thumbs.append(maskThumb);
+    el.append(eye, thumbs, name);
     el.addEventListener("click", (e) => {
       // Rows are rebuilt on selection changes, so the browser cannot pair two clicks into a dblclick;
       // detect the double-click here from two plain clicks on the same layer.
@@ -1395,7 +1496,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
 
   /* canvas events */
   canvas.addEventListener("pointerdown", (e) => {
-    if (e.button === 2) return; // context menu
+    if (e.button === 2 && !app.isBrushTool()) return; // context menu
+    if (e.button === 2) { canvas.setPointerCapture(e.pointerId); app.pointerDown(canvas, e); return; } // right-drag sizes the tip
     if (app.session.textEdit) {
       // Clicking the canvas outside the editor commits; a click on another text layer starts editing it.
       app.endTextEdit(true);
@@ -1408,6 +1510,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     }
     canvas.setPointerCapture(e.pointerId);
     app.pointerDown(canvas, e);
+    if (app.brushError) { reportError(app.brushError); app.brushError = null; }
   });
   canvas.addEventListener("dblclick", (e) => {
     if (app.session.tool === "lasso" && app.session.lassoPath) { app.closeLasso(e.shiftKey ? "add" : e.altKey ? "subtract" : "replace"); return; }
@@ -1417,6 +1520,11 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   });
   canvas.addEventListener("contextmenu", (e) => {
     e.preventDefault();
+    if (app.isBrushTool()) return; // shown on pointer-up unless the right-drag resized the tip
+    canvasMenu(e.clientX, e.clientY);
+  });
+  function canvasMenu(x: number, y: number): void {
+    const e = { clientX: x, clientY: y };
     if (app.hasSelection()) showContextMenu(e.clientX, e.clientY, selectionMenuItems());
     else showContextMenu(e.clientX, e.clientY, [
       { label: "Select All", shortcut: "⌘A", action: () => app.selectAll() },
@@ -1424,7 +1532,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       { sep: true, label: "" },
       ...layerMenuItems(),
     ]);
-  });
+  }
 
   /** Right-click inside a selection: what Photoshop offers, starting with the extraction commands. */
   function selectionMenuItems(): MenuItem[] {
@@ -1487,7 +1595,9 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   });
   window.addEventListener("blur", () => { if (app.tempHand) { app.tempHand = false; applyCursor(); } });
   canvas.addEventListener("pointerup", (e) => {
+    const tipMoved = app.tipDragMoved;
     app.pointerUp(canvas, e);
+    if (e.button === 2 && app.isBrushTool()) { if (!tipMoved) canvasMenu(e.clientX, e.clientY); return; }
     mods.dragging = false;
     applyCursor(e);
     // Placing text: hand the keyboard to the text field so typing starts immediately.
@@ -1545,6 +1655,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     if (mod && key === "a") { e.preventDefault(); app.selectAll(); return; }
     if (mod && key === "d") { e.preventDefault(); app.deselect(); return; }
     if (mod && e.shiftKey && key === "i") { e.preventDefault(); app.invertSelection(); return; }
+    if (e.key === "Escape" && app.painting) { app.cancelBrush(); return; }
+    if (app.painting) return; // a stroke keeps the keyboard until it ends
     if (app.session.tool === "crop" && app.session.cropRect && !mod) {
       if (e.key === "Enter") { e.preventDefault(); app.applyCrop(); return; }
       if (e.key === "Escape") { app.session.cropRect = null; app.emit(); return; }
@@ -1596,13 +1708,20 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     }
     if (!mod && !e.altKey && key === "x") { app.swapColors(); return; }
     if (!mod && !e.altKey && key === "d") { app.resetColors(); return; }
-    if (!mod && (e.key === "[" || e.key === "]" || e.key === "{" || e.key === "}")) {
+    if (!mod && app.isBrushTool() && (e.key === "[" || e.key === "]" || e.key === "{" || e.key === "}")) {
       e.preventDefault();
       app.adjustBrush(e.key === "]" || e.key === "}" ? 1 : -1, e.shiftKey || e.key === "{" || e.key === "}");
       return;
     }
-    const hit = TOOL_META.find((x) => x.key === e.key.toLowerCase());
-    if (hit && !mod) app.setTool(hit.id);
+    if (!mod && !e.altKey && /^[0-9]$/.test(e.key)) { app.typeOpacityDigit(Number(e.key)); return; }
+    if (e.key === "Tab" && !mod && !e.altKey && !e.shiftKey && !app.session.textEdit) { e.preventDefault(); app.cycleToolMode(); return; }
+    if (mod || e.altKey) return;
+    if (key === "a") { app.setTool("idle"); return; }
+    if (key === "b") { app.setBrushMode("paint"); return; }
+    if (key === "e") { app.setBrushMode("erase"); return; }
+    if (key === "u" && e.shiftKey && app.session.tool === "shape") { app.cycleToolMode(); return; }
+    const hit = TOOL_META.find((x) => x.key === key);
+    if (hit) app.setTool(hit.id);
   };
   window.addEventListener("keydown", onKey);
 

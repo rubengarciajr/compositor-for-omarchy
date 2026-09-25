@@ -468,7 +468,7 @@ input[type="number"], input[type="text"], select {
 }
 .layer-row {
   display: grid;
-  grid-template-columns: 22px 40px 1fr;
+  grid-template-columns: 22px auto 1fr;
   gap: 8px;
   align-items: center;
   padding: 6px 8px;
@@ -726,3 +726,14 @@ input[type="number"], input[type="text"], select {
 .modal .about-credit { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; margin: 10px 0; background: var(--bg-darker); }
 .modal .about-credit-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-dark); margin-bottom: 4px; }
 .modal .about-small { color: var(--fg-dark); font-size: 12px; }
+
+/* Compositor 1.3 tool headers: number fields with units, segmented modes, mask thumbnails. */
+.tool-header .num { display: inline-flex; align-items: center; gap: 3px; }
+.tool-header .num input[type="number"] { text-align: right; }
+.tool-header .num .unit { color: var(--fg-dark); font-size: 12px; }
+.tool-header .field .seg button { padding: 2px 8px; font-size: 12px; }
+.layer-row .thumbs { display: flex; align-items: center; gap: 6px; }
+.layer-row .thumb.mask { margin: 0; }
+.layer-row .thumb.mask canvas { background: #000; }
+.layer-row .thumb.mask.off { opacity: 0.45; }
+.layer-row .thumb.target { outline: 2px solid var(--accent); outline-offset: 1px; }

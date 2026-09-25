@@ -12,6 +12,8 @@ export interface GradientSettings {
   preset: GradientPresetId;
   style: GradientStyle;
   reverse: boolean;
+  /** 0.01…1, applied to the whole fill (Compositor 1.3). */
+  opacity: number;
 }
 
 export interface GradientStop { offset: number; color: string }
@@ -23,7 +25,7 @@ export const GRADIENT_PRESETS: { id: GradientPresetId; name: string }[] = [
   { id: "black-white", name: "Black, White" },
 ];
 
-export const DEFAULT_GRADIENT: GradientSettings = { preset: "fg-bg", style: "linear", reverse: false };
+export const DEFAULT_GRADIENT: GradientSettings = { preset: "fg-transparent", style: "linear", reverse: false, opacity: 1 };
 
 const STORAGE_KEY = "compositor.gradient";
 
@@ -36,6 +38,7 @@ export function loadGradientSettings(): GradientSettings {
       preset: GRADIENT_PRESETS.some((p) => p.id === v.preset) ? (v.preset as GradientPresetId) : DEFAULT_GRADIENT.preset,
       style: v.style === "radial" ? "radial" : "linear",
       reverse: !!v.reverse,
+      opacity: typeof v.opacity === "number" && isFinite(v.opacity) ? Math.min(1, Math.max(0.01, v.opacity)) : 1,
     };
   } catch {
     return { ...DEFAULT_GRADIENT };
@@ -86,6 +89,9 @@ export function paintGradient(
     ? ctx.createRadialGradient(line.x1, line.y1, 0, line.x1, line.y1, Math.max(len, 0.01))
     : ctx.createLinearGradient(line.x1, line.y1, line.x2, line.y2);
   for (const s of stops) grad.addColorStop(s.offset, s.color);
+  ctx.save();
+  ctx.globalAlpha = Math.min(1, Math.max(0.01, settings.opacity ?? 1));
   ctx.fillStyle = grad;
   ctx.fillRect(0, 0, width, height);
+  ctx.restore();
 }

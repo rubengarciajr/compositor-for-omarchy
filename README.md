@@ -48,7 +48,7 @@ Then launch **Compositor** from the app menu, or `compositor photo.png` from a t
 ## What you get
 
 - **Layers** — raster layers and folders, opacity, all the Photoshop blend modes, masks, clipping, effects (stroke, shadows, glow, colour overlay), adjustment layers, merge and flatten, inline rename, drag to reorder or into folders, right-click menu.
-- **Tools** — Move with free-transform handles, Marquee, Lasso (freehand and polygon), Magic Wand, Crop with handles, Brush, Eraser, Clone Stamp, Blur, Spot Healing, Gradient with Photoshop's presets, Shape, Type on the canvas, Eyedropper, Hand, Zoom — with Photoshop's modifiers (Space pans, Shift-click lines, Alt samples, Shift/Alt constrain, Ctrl-click auto-select, Alt-drag duplicate).
+- **Tools** — Move with free-transform handles, Marquee, Lasso (freehand and polygon), Magic Wand, Crop with handles, Brush / Eraser with Compositor's stroke engine, Spot Healing (Content-Aware, Create Texture, Proximity Match), Clone Stamp, Smear (Liquify, Blur, Smudge), Gradient with Photoshop's presets, Shape, Type on the canvas, Eyedropper, Hand, Zoom — with Photoshop's modifiers (Space pans, Shift-click lines, Alt samples, Shift/Alt constrain, Ctrl-click auto-select, Alt-drag duplicate).
 - **Selections** — marching ants, add and subtract with Shift and Alt, Layer via Copy / Cut, layer mask from selection, inverse, deselect, fill and clear.
 - **Files** — `.comp` projects shared with the Mac app, images by drag & drop, paste from anywhere, export PNG and JPEG, several documents open at once.
 - **Omarchy** — the palette follows your active theme within seconds; Dark and Light are a menu away; the window behaves like Omarchy's other apps.
