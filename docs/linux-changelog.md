@@ -10,6 +10,12 @@ Brings the Linux port up to the features Compositor for macOS shipped between 1.
 
 ### Added
 - **Watch AI design** (Compositor 1.3): any script or AI agent that can write files can build or change a project while it is open, and the canvas reloads as the package changes, usually within half a second. Open a `.comp` **package folder** (`manifest.json` + `images/`, the layout agents and the Mac app write) with File › Open Package Folder…, by dropping the folder on the canvas, or with `compositor ~/Desktop/demo.comp`; a `.comp` ZIP file opened through the file dialog is watched too. A reload keeps zoom, scroll, selection and the selected layer; with unsaved edits the app asks to Revert or Keep Mine. Save writes back into the folder (images first, manifest last); Save As Package Folder… turns any document into one. Watched documents show ⟳ in the status bar. How to write packages: [`docs/writing-comp-files.md`](writing-comp-files.md).
+- **Copy and paste whole layers** (Compositor 1.2.5): `Ctrl+C` with no selection copies the selected layers themselves, and `Ctrl+V` in this or another open project pastes them above the active layer with editable text, masks, effects and folders intact; other apps still receive the PNG. `Ctrl+J`, paste and Alt-drag duplicate every selected layer, stacked together above the topmost, and `Ctrl+J` duplicates folders with their contents.
+- **Crop ratios** (Compositor 1.2.5): Free, 1:1, 4:3, 3:4, 16:9 and 9:16 in the Crop header, and with a selection the crop box starts at its bounds.
+- **Drag a number's label to change its value** (Compositor 1.2.11): brush size, hardness, opacity, flow, spacing, transform X/Y/W/H/angle, text size, leading, tracking and the rest; Shift drags ten times faster.
+- **SVG import** (Compositor 1.2.10): an SVG added, pasted or dropped is rasterised sharp at a size that fits the canvas.
+- **Inner Glow** layer effect (format parity with the Mac app's `innerGlow`): rendered, saved and loaded.
+- **Quit or close while typing** (Compositor 1.3.1): the text is committed and the usual save prompt follows.
 
 ## 1.1.1 — 2026-09-23
 

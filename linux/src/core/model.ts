@@ -53,7 +53,7 @@ export type AdjustmentKind =
   | "hsv" | "levels" | "curves" | "exposure" | "gradient-map" | "grain"
   | "add-noise" | "gaussian-blur" | "motion-blur" | "invert" | "black-white" | "color-balance";
 
-export type EffectKind = "stroke" | "drop-shadow" | "color-overlay" | "inner-shadow" | "outer-glow";
+export type EffectKind = "stroke" | "drop-shadow" | "color-overlay" | "inner-shadow" | "outer-glow" | "inner-glow";
 
 export type ToolId =
   | "idle" | "move" | "marquee" | "lasso" | "wand" | "crop"
@@ -223,6 +223,8 @@ export interface SessionState {
   /** Gradient tool preset, style and direction (remembered between sessions). */
   gradient: GradientSettings;
   cropRect: { x: number; y: number; w: number; h: number } | null;
+  /** Crop tool aspect ratio (width / height), null for free. */
+  cropRatio: number | null;
   /** Start→end of a gradient drag, drawn as a guide line while dragging. */
   dragLine: { x1: number; y1: number; x2: number; y2: number } | null;
   /** Pointer position over the canvas in document space (for the brush size preview). */

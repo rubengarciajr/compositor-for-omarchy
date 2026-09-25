@@ -12,6 +12,7 @@ import { applyThemeChoice, getThemePreference, parseColorsToml, themeChoice } fr
 import { hitTest, rotateByPointer, scaleByHandle } from "./core/transform";
 import { buildProject, parseProject, serializeProject } from "./io/project";
 import { memorySource } from "./io/package";
+import { applyEffects } from "./core/pixels";
 import { readZip } from "./io/zip";
 import { cursorForTool, WAND_ADD_CURSOR, WAND_CURSOR, WAND_SUBTRACT_CURSOR } from "./ui/cursors";
 import { writableLayer } from "./core/history";
@@ -384,6 +385,71 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const n = app.doc!.layers.length;
     app.pointerDown(view, ev(10, 20, { alt: true })); app.pointerMove(view, ev(30, 20, { alt: true })); app.pointerUp(view, ev(30, 20, { alt: true }));
     check("alt-drag with move duplicates the layer", app.doc!.layers.length === n + 1 && app.activeLayer!.id !== topId && Math.round(app.activeLayer!.transform.x) === 20, { n, now: app.doc!.layers.length, x: app.activeLayer!.transform.x });
+  }
+  // Compositor 1.2.5–1.2.11 features: layer clipboard, stacked duplicates, crop ratios and
+  // selection-start, scrubby labels, sharp SVG import, inner glow.
+  {
+    app.newDocument(120, 80, "clipA");
+    app.setTool("type");
+    app.addTextLayer(10, 10, "Hi");
+    const text = app.activeLayer!;
+    const mask = createCanvas(120, 80); mask.getContext("2d")!.fillStyle = "#fff"; mask.getContext("2d")!.fillRect(0, 0, 120, 80);
+    text.mask = { canvas: mask, enabled: true, linked: true };
+    app.addEffect("drop-shadow");
+    app.selectLayer(text.id);
+    check("layers copy to the layer clipboard", app.copyLayers(123) && app.layerClipboard!.layers.length === 1 && app.isLayerClipboardImage(new Blob([new Uint8Array(123)])) && !app.isLayerClipboardImage(new Blob([new Uint8Array(124)])), { n: app.layerClipboard?.layers.length });
+    app.newDocument(200, 100, "clipB");
+    const before = app.doc!.layers.length;
+    app.pasteLayers();
+    const pasted = app.activeLayer!;
+    check("pasted layers stay editable in another document", app.doc!.layers.length === before + 1 && pasted.kind === "text" && pasted.text?.text === "Hi" && !!pasted.mask && pasted.effects.length === 1 && pasted.id !== text.id, { kind: pasted.kind, text: pasted.text?.text, mask: !!pasted.mask, fx: pasted.effects.length });
+    // Ctrl+J with two layers selected stacks the copies above the topmost of them, in order.
+    app.newDocument(50, 50, "dup");
+    app.addBlankLayer(); const l1 = app.activeLayer!; l1.name = "L1";
+    app.addBlankLayer(); const l2 = app.activeLayer!; l2.name = "L2";
+    app.addBlankLayer(); app.activeLayer!.name = "L3";
+    app.selectLayer(l1.id); app.selectLayer(l2.id, { toggle: true });
+    app.duplicateLayer(0);
+    check("duplicates are stacked above the topmost selected layer", app.doc!.layers.map((l) => l.name).join(",") === "Background,L1,L2,L1 copy,L2 copy,L3", app.doc!.layers.map((l) => l.name));
+    // Crop: the box starts at the selection and keeps the chosen ratio while dragging.
+    app.newDocument(60, 40, "crop");
+    const view = document.getElementById("editor") as HTMLCanvasElement;
+    const ev = (x: number, y: number) => {
+      const rect = view.getBoundingClientRect(); const z = app.session.zoom;
+      const ox = rect.left + rect.width / 2 + app.session.panX - (app.doc!.width * z) / 2, oy = rect.top + rect.height / 2 + app.session.panY - (app.doc!.height * z) / 2;
+      return { clientX: ox + x * z, clientY: oy + y * z, button: 0, altKey: false, shiftKey: false, ctrlKey: false, metaKey: false } as unknown as PointerEvent;
+    };
+    app.setTool("marquee");
+    app.pointerDown(view, ev(5, 5)); app.pointerMove(view, ev(25, 15)); app.pointerUp(view, ev(25, 15));
+    app.setTool("crop");
+    const fromSel = { ...app.session.cropRect! };
+    app.session.cropRect = null; app.deselect();
+    app.session.cropRatio = 1;
+    app.pointerDown(view, ev(10, 10)); app.pointerMove(view, ev(50, 20)); app.pointerUp(view, ev(50, 20));
+    const square = { ...app.session.cropRect! };
+    app.session.cropRatio = null; app.session.cropRect = null;
+    check("crop starts at the selection and keeps the ratio", fromSel.x === 5 && fromSel.y === 5 && fromSel.w === 20 && fromSel.h === 10 && Math.round(square.w) === 40 && Math.round(square.h) === 40, { fromSel, square });
+    // Scrubby label: dragging "Size" changes the brush size.
+    app.setTool("brush");
+    app.session.brush.size = 24;
+    app.emit();
+    const label = document.querySelector<HTMLElement>(".tool-header .field label.scrub")!;
+    label.dispatchEvent(new PointerEvent("pointerdown", { clientX: 100, clientY: 10, bubbles: true }));
+    window.dispatchEvent(new PointerEvent("pointermove", { clientX: 150, clientY: 10 }));
+    window.dispatchEvent(new PointerEvent("pointerup", { clientX: 150, clientY: 10 }));
+    check("dragging a number's label scrubs its value", label.textContent === "Size" && app.session.brush.size === 74, { label: label.textContent, size: app.session.brush.size });
+    // SVG comes in rasterised sharp at a size that fits the canvas.
+    app.newDocument(200, 100, "svg");
+    const svg = new File([`<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50" viewBox="0 0 100 50"><rect width="100" height="50" fill="#00aaff"/></svg>`], "logo.svg", { type: "image/svg+xml" });
+    await app.pasteImageFile(svg, "logo");
+    const sl = app.activeLayer!;
+    check("SVG imports sharp at canvas-fitting size", sl.canvas!.width === 200 && sl.canvas!.height === 100 && Math.round(sl.transform.width) === 200 && px(sl.canvas!, 100, 50)[2] > 200, { w: sl.canvas!.width, h: sl.canvas!.height, t: sl.transform.width });
+    // Inner glow: colour creeps in from the edges, the centre stays.
+    const sq = createCanvas(60, 40); sq.getContext("2d")!.fillStyle = "#000"; sq.getContext("2d")!.fillRect(20, 10, 20, 20);
+    const glowed = applyEffects(sq, [{ kind: "inner-glow", enabled: true, color: "#ff0000", opacity: 1, size: 6, distance: 0, angle: 0, spread: 0 }]);
+    const pad = (glowed.width - 60) / 2;
+    const edge = px(glowed, pad + 21, pad + 20), mid = px(glowed, pad + 30, pad + 20);
+    check("inner glow lights the inside of the edges", edge[0] > 40 && mid[0] < 60 && edge[3] > 200, { edge, mid });
   }
   // Live reload (Compositor 1.3 "Watch AI design"): a package edited on disk by a script or agent
   // reloads the open document; unsaved edits are kept or reverted on request; Save writes in place.

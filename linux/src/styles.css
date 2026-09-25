@@ -217,6 +217,8 @@ input[type="number"], input[type="text"], select {
   white-space: nowrap;
 }
 .tool-header .field label { color: var(--fg-dark); }
+.tool-header .field label.scrub { cursor: ew-resize; user-select: none; }
+.tool-header .field label.scrub:hover { color: var(--fg-bright); }
 .tool-header input[type="range"] { width: 90px; }
 .tool-header .val {
   font-family: var(--font-mono);

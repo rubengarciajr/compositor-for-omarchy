@@ -213,7 +213,7 @@ export function applyEffects(src: HTMLCanvasElement, effects: LayerEffect[]): HT
   for (const fx of active) {
     if (fx.kind === "color-overlay") {
       ctx.drawImage(silhouette(fx.color, fx.opacity), pad, pad);
-    } else if (fx.kind === "inner-shadow") {
+    } else if (fx.kind === "inner-shadow" || fx.kind === "inner-glow") {
       // Shadow cast by the area *outside* the layer, clipped to the layer.
       const inverse = createCanvas(src.width + pad * 2, src.height + pad * 2);
       const ictx = inverse.getContext("2d")!;
@@ -224,7 +224,7 @@ export function applyEffects(src: HTMLCanvasElement, effects: LayerEffect[]): HT
 
       const shadow = createCanvas(src.width, src.height);
       const sctx = shadow.getContext("2d")!;
-      const { dx, dy } = offset(fx);
+      const { dx, dy } = fx.kind === "inner-glow" ? { dx: 0, dy: 0 } : offset(fx);
       sctx.shadowColor = hexToRgba(fx.color, fx.opacity);
       sctx.shadowBlur = fx.size;
       sctx.shadowOffsetX = dx + farAway;

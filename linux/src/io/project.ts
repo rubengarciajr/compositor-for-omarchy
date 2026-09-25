@@ -83,6 +83,7 @@ function effectsRecord(effects: LayerEffect[]): Record<string, unknown> | undefi
     else if (fx.kind === "color-overlay") rec.colorOverlay = base;
     else if (fx.kind === "inner-shadow") rec.innerShadow = { ...base, angle: fx.angle, distance: fx.distance, blur: fx.size };
     else if (fx.kind === "outer-glow") rec.outerGlow = { ...base, size: fx.size };
+    else if (fx.kind === "inner-glow") rec.innerGlow = { ...base, size: fx.size };
   }
   return Object.keys(rec).length ? rec : undefined;
 }
@@ -98,7 +99,7 @@ function effectsFromRecord(rec: Record<string, unknown> | undefined): LayerEffec
       angle: Number(e.angle ?? 120), spread: 0,
     });
   };
-  get("stroke", "stroke"); get("shadow", "drop-shadow"); get("colorOverlay", "color-overlay"); get("innerShadow", "inner-shadow"); get("outerGlow", "outer-glow");
+  get("stroke", "stroke"); get("shadow", "drop-shadow"); get("colorOverlay", "color-overlay"); get("innerShadow", "inner-shadow"); get("outerGlow", "outer-glow"); get("innerGlow", "inner-glow");
   return out;
 }
 

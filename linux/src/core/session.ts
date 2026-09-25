@@ -123,6 +123,7 @@ export class App {
       },
       gradient: loadGradientSettings(),
       cropRect: null,
+      cropRatio: null,
       dragLine: null,
       hover: null,
       textEdit: null,
@@ -223,9 +224,14 @@ export class App {
     return new Promise<void>((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
-        const w = img.naturalWidth, h = img.naturalHeight;
+        let w = img.naturalWidth || 1024, h = img.naturalHeight || 1024;
+        if (file.type === "image/svg+xml") {
+          // Vector: rasterise sharp at a size that fits the canvas (Compositor 1.2.10).
+          const k = Math.min(doc.width / w, doc.height / h);
+          w = Math.max(1, Math.round(w * k)); h = Math.max(1, Math.round(h * k));
+        }
         const canvas = createCanvas(w, h);
-        canvas.getContext("2d")!.drawImage(img, 0, 0);
+        canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
         // Never overgrow the canvas: fit inside it (the bitmap keeps its full resolution; only the
         // transform shrinks, so scaling back up later loses nothing).
         const k = Math.min(1, doc.width / w, doc.height / h);
@@ -293,8 +299,17 @@ export class App {
     if (!canvas) return false;
     const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
     if (!blob) return false;
+    // No selection: the layers themselves are copied too, so Ctrl+V here pastes editable layers
+    // while other apps still get the PNG. The PNG's size tells the two apart on paste.
+    if (!merged && !this.doc?.selection?.mask) this.copyLayers(blob.size);
+    else this.layerClipboard = null;
     await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
     return true;
+  }
+
+  /** True when a pasted image is the PNG that Ctrl+C wrote for the layers in the layer clipboard. */
+  isLayerClipboardImage(blob: Blob): boolean {
+    return !!this.layerClipboard && this.layerClipboard.pngSize > 0 && blob.size === this.layerClipboard.pngSize;
   }
 
   /** Paste from the system clipboard via the async API (menu item); Ctrl+V uses the paste event instead. */
@@ -303,7 +318,9 @@ export class App {
     for (const item of items) {
       const type = item.types.find((t) => t.startsWith("image/"));
       if (type) {
-        await this.pasteImageFile(await item.getType(type));
+        const blob = await item.getType(type);
+        if (this.isLayerClipboardImage(blob)) return this.pasteLayers();
+        await this.pasteImageFile(blob);
         return true;
       }
     }
@@ -728,31 +745,75 @@ export class App {
     if (!doc) return;
     const selected = doc.layers.filter((l) => this.session.selectedLayerIds.includes(l.id));
     if (!selected.length && this.activeLayer) selected.push(this.activeLayer);
-    const newIds: string[] = [];
-    for (const layer of selected) {
-      if (layer.kind === "group") {
-        const idMap = new Map<string, string>();
-        const block = [layer, ...descendants(doc, layer.id)];
-        const copies = block.map((l) => {
-          const c = this.cloneLayerShallow(l, l === layer ? " copy" : "");
-          idMap.set(l.id, c.id);
-          return c;
-        });
-        for (const c of copies) if (c.parentId && idMap.has(c.parentId)) c.parentId = idMap.get(c.parentId)!;
-        const at = Math.max(...block.map((l) => doc.layers.indexOf(l)));
-        doc.layers.splice(at + 1, 0, ...copies);
-        newIds.push(copies[0].id);
-      } else {
-        const copy = this.cloneLayerShallow(layer, " copy");
-        copy.transform = { ...copy.transform, x: copy.transform.x + offset, y: copy.transform.y + offset };
-        doc.layers.splice(doc.layers.indexOf(layer) + 1, 0, copy);
-        newIds.push(copy.id);
-      }
-    }
+    // Copies are stacked together above the topmost selected layer, in the same order (Compositor 1.2.5).
+    const ordered = selected.slice().sort((a, b) => doc.layers.indexOf(a) - doc.layers.indexOf(b));
+    const copies = this.cloneLayers(doc, ordered, " copy", offset);
+    const top = Math.max(...ordered.map((l) => Math.max(doc.layers.indexOf(l), ...descendants(doc, l.id).map((d) => doc.layers.indexOf(d)))));
+    doc.layers.splice(top + 1, 0, ...copies.all);
+    const newIds = copies.roots.map((l) => l.id);
     if (!newIds.length) return;
     this.session.activeLayerId = newIds[newIds.length - 1];
     this.session.selectedLayerIds = newIds;
     this.commit("Duplicate layer");
+  }
+
+  /** Deep copies of layers (folders bring their contents) with fresh ids and re-linked parents. */
+  private cloneLayers(doc: DocumentState, layers: Layer[], suffix: string, offset = 0): { all: Layer[]; roots: Layer[] } {
+    const all: Layer[] = [], roots: Layer[] = [];
+    const idMap = new Map<string, string>();
+    for (const layer of layers) {
+      const block = layer.kind === "group" ? [layer, ...descendants(doc, layer.id)] : [layer];
+      for (const l of block) {
+        if (idMap.has(l.id)) continue; // already copied as part of a selected folder
+        const c = this.cloneLayerShallow(l, l === layer ? suffix : "");
+        idMap.set(l.id, c.id);
+        if (l === layer) {
+          roots.push(c);
+          if (l.kind !== "group") c.transform = { ...c.transform, x: c.transform.x + offset, y: c.transform.y + offset };
+        }
+        all.push(c);
+      }
+    }
+    for (const c of all) if (c.parentId && idMap.has(c.parentId)) c.parentId = idMap.get(c.parentId)!;
+    return { all, roots };
+  }
+
+  /* ── Layer clipboard: Ctrl+C / Ctrl+V with no selection copy whole layers (Compositor 1.2.5) ── */
+
+  /** Whole layers copied with Ctrl+C (no selection): editable text, masks, effects and folders survive. */
+  layerClipboard: { layers: Layer[]; parents: Map<string, string | null>; pngSize: number } | null = null;
+
+  copyLayers(pngSize = 0): boolean {
+    const doc = this.doc;
+    if (!doc) return false;
+    const selected = doc.layers.filter((l) => this.session.selectedLayerIds.includes(l.id));
+    if (!selected.length && this.activeLayer) selected.push(this.activeLayer);
+    if (!selected.length) return false;
+    const ordered = selected.slice().sort((a, b) => doc.layers.indexOf(a) - doc.layers.indexOf(b));
+    const copies = this.cloneLayers(doc, ordered, "");
+    this.layerClipboard = { layers: copies.all, parents: new Map(copies.all.map((l) => [l.id, l.parentId])), pngSize };
+    return true;
+  }
+
+  /** Paste copied layers above the active layer of the current document (any document). */
+  pasteLayers(): boolean {
+    const doc = this.doc;
+    const clip = this.layerClipboard;
+    if (!doc || !clip?.layers.length) return false;
+    const temp = createDocument(1, 1, "clip");
+    temp.layers = clip.layers.map((l) => ({ ...l, parentId: clip.parents.get(l.id) ?? null }));
+    const roots = temp.layers.filter((l) => !l.parentId || !temp.layers.some((p) => p.id === l.parentId));
+    const copies = this.cloneLayers(temp, roots, "");
+    const active = this.activeLayer;
+    const parentId = active?.kind === "group" ? active.id : (active?.parentId ?? null);
+    for (const r of copies.roots) r.parentId = parentId;
+    const at = active ? Math.max(doc.layers.indexOf(active), ...descendants(doc, active.id).map((d) => doc.layers.indexOf(d))) : doc.layers.length - 1;
+    doc.layers.splice(at + 1, 0, ...copies.all);
+    this.session.selectedLayerIds = copies.roots.map((l) => l.id);
+    this.session.activeLayerId = this.session.selectedLayerIds[this.session.selectedLayerIds.length - 1] ?? null;
+    this.setTool("move");
+    this.commit("Paste layers");
+    return true;
   }
 
   private cloneLayerShallow(layer: Layer, suffix: string): Layer {
@@ -818,6 +879,11 @@ export class App {
   setTool(tool: ToolId): void {
     if (this.session.textEdit && tool !== "type") this.endTextEdit(true);
     this.session.tool = tool;
+    if (tool === "crop" && this.doc?.selection?.mask && !this.session.cropRect) {
+      // With a selection, the crop box starts at its bounds (Compositor 1.2.5).
+      const b = maskBounds(this.doc.selection.mask);
+      if (b) this.session.cropRect = { ...b };
+    }
     if (tool === "eraser") this.session.brush.erase = true;
     if (tool === "brush") this.session.brush.erase = false;
     this.emitView();
@@ -1407,14 +1473,13 @@ export class App {
       return;
     }
     if (this.dragMode === "crop" && this.marqueeStart) {
-      const x = Math.min(this.marqueeStart.x, p.x);
-      const y = Math.min(this.marqueeStart.y, p.y);
-      this.session.cropRect = {
-        x,
-        y,
-        w: Math.abs(p.x - this.marqueeStart.x),
-        h: Math.abs(p.y - this.marqueeStart.y),
-      };
+      const s0 = this.marqueeStart;
+      let w = Math.abs(p.x - s0.x), h = Math.abs(p.y - s0.y);
+      const ratio = this.session.cropRatio;
+      if (ratio) { if (w / Math.max(1e-6, h) > ratio) h = w / ratio; else w = h * ratio; } // keep the aspect ratio
+      const x = p.x < s0.x ? s0.x - w : s0.x;
+      const y = p.y < s0.y ? s0.y - h : s0.y;
+      this.session.cropRect = { x, y, w, h };
       this.overlay();
     }
     if (this.dragMode === "crop-handle" && this.transformStart && this.transformHandle) {

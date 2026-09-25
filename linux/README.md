@@ -64,7 +64,7 @@ flowchart LR
 - **Canvas** — pixel grid when zoomed, guides, pan/zoom, fit on screen, several documents open at once (switch in the status bar)
 - **Watch AI design** — open a `.comp` package folder and let a script or AI agent (Claude Code, Codex…) build or change it while it is open: the canvas reloads as the files change, Save writes back into the folder ([`docs/writing-comp-files.md`](../docs/writing-comp-files.md))
 - **Files** — `.comp` projects (Save / Save As / Open, native dialogs) that keep every layer editable and unzip into the macOS app's package format; open images by drag & drop, File → Open, or on the command line; export PNG / JPEG
-- **Clipboard** — paste images from anywhere as a new layer (`Ctrl+V`); Copy / Copy Merged put PNG on the system clipboard, limited to the selection
+- **Clipboard** — paste images from anywhere as a new layer (`Ctrl+V`); Copy / Copy Merged put PNG on the system clipboard, limited to the selection; with no selection `Ctrl+C` / `Ctrl+V` copy whole layers (text, masks, effects, folders) between open projects
 - **Omarchy theming** — live `colors.toml` sync, light and dark palettes, accent + surface tokens
 
 ## Stack

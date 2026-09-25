@@ -319,12 +319,14 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   async function closeDocumentAsk(): Promise<void> {
     const doc = app.doc;
     if (!doc) return;
+    if (app.session.textEdit) app.endTextEdit(true); // text being typed is committed first (Compositor 1.3.1)
     if (await resolveUnsaved(doc)) app.closeDocument(doc.id);
   }
 
   let allowUnload = false;
   /** Quit: settle every unsaved document, then close the window ourselves. */
   async function quitAsk(): Promise<void> {
+    if (app.session.textEdit) app.endTextEdit(true);
     for (const doc of [...app.docs]) {
       if (!(await resolveUnsaved(doc))) return;
       doc.dirty = false;
@@ -731,6 +733,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       f.className = "field";
       f.innerHTML = `<label>${label}</label>`;
       f.appendChild(control);
+      makeScrubby(f.querySelector("label")!, control);
       return f;
     };
 
@@ -1012,10 +1015,15 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
       const cancel = document.createElement("button");
       cancel.textContent = "Cancel";
       cancel.addEventListener("click", () => { app.session.cropRect = null; app.emit(); });
+      const ratio = document.createElement("select");
+      const ratios: [string, number | null][] = [["Free", null], ["1:1", 1], ["4:3", 4 / 3], ["3:4", 3 / 4], ["16:9", 16 / 9], ["9:16", 9 / 16]];
+      ratio.innerHTML = ratios.map(([l, v]) => `<option value="${v ?? ""}">${l}</option>`).join("");
+      ratio.value = s.cropRatio == null ? "" : String(s.cropRatio);
+      ratio.addEventListener("change", () => { s.cropRatio = ratio.value === "" ? null : Number(ratio.value); });
       const how = document.createElement("div");
       how.className = "hint";
       how.textContent = "Drag the area · drag the handles to adjust, inside to move · Enter applies · Esc cancels";
-      toolHeader.append(apply, cancel, how);
+      toolHeader.append(field("Ratio", ratio), apply, cancel, how);
     } else if (tool === "gradient") {
       toolHeader.append(...gradientHeader());
     } else if (tool === "eyedropper") {
@@ -1598,6 +1606,39 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   window.addEventListener("resize", onResize);
 
   /* modals */
+  /**
+   * Drag a number's label to change its value, as in Photoshop (Compositor 1.2.11): works for
+   * any field whose control is (or contains) a range or number input. Shift drags ten times faster.
+   */
+  function makeScrubby(label: HTMLElement, control: HTMLElement): void {
+    const input = (control instanceof HTMLInputElement ? control : control.querySelector("input")) as HTMLInputElement | null;
+    if (!input || (input.type !== "range" && input.type !== "number")) return;
+    label.classList.add("scrub");
+    label.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const step = Number(input.step) > 0 ? Number(input.step) : 1;
+      const start = Number(input.value) || 0;
+      const x0 = e.clientX;
+      const fine = step < 1 ? step : Math.max(step, 1);
+      const move = (ev: PointerEvent) => {
+        const px = ev.clientX - x0;
+        let v = start + px * fine * (ev.shiftKey ? 10 : 1) * (step < 1 ? 4 : 1);
+        if (input.min !== "") v = Math.max(Number(input.min), v);
+        if (input.max !== "") v = Math.min(Number(input.max), v);
+        v = Math.round(v / step) * step;
+        input.value = String(Math.round(v * 1000) / 1000);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+    });
+  }
+
   /** Links open in a normal browser window of the same profile (the app window stays). */
   function openLink(url: string): void {
     window.open(url, "_blank", "noopener");
@@ -1920,6 +1961,7 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
         const f = item.getAsFile();
         if (!f) continue;
         e.preventDefault();
+        if (app.isLayerClipboardImage(f)) { app.pasteLayers(); return; }
         app.pasteImageFile(f).catch(console.error);
         return;
       }
