@@ -62,6 +62,7 @@ flowchart LR
 - **Gradient** — Photoshop "Basics" presets (Foreground to Background, Foreground to Transparent, Background to Transparent, Black/White), linear or radial, reverse; painted along the drag on its own new layer, limited to the selection when there is one
 - **Selections** — mask-based with marching ants; Magic Wand, Marquee and Lasso add with `Shift` and subtract with `Alt` (cursor shows + / −); right-click a selection for Layer via Copy / Cut, Layer Mask from Selection, Inverse, Deselect, Fill, Clear; Select menu with `Ctrl+A` / `Ctrl+D` / `Ctrl+Shift+I` / `Ctrl+J` / `Ctrl+Shift+J`
 - **Canvas** — pixel grid when zoomed, guides, pan/zoom, fit on screen, several documents open at once (switch in the status bar)
+- **Watch AI design** — open a `.comp` package folder and let a script or AI agent (Claude Code, Codex…) build or change it while it is open: the canvas reloads as the files change, Save writes back into the folder ([`docs/writing-comp-files.md`](../docs/writing-comp-files.md))
 - **Files** — `.comp` projects (Save / Save As / Open, native dialogs) that keep every layer editable and unzip into the macOS app's package format; open images by drag & drop, File → Open, or on the command line; export PNG / JPEG
 - **Clipboard** — paste images from anywhere as a new layer (`Ctrl+V`); Copy / Copy Merged put PNG on the system clipboard, limited to the selection
 - **Omarchy theming** — live `colors.toml` sync, light and dark palettes, accent + surface tokens

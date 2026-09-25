@@ -585,9 +585,11 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     const file = menu("File", [
       { label: "New…", shortcut: "⌘N", action: () => showNewCanvas() },
       { label: "Open…", shortcut: "⌘O", action: () => openFileDialog() },
+      { label: "Open Package Folder…", action: () => openFolderDialog() },
       { sep: true, label: "" },
       { label: "Save", shortcut: "⌘S", action: () => void app.saveProject(false).catch(reportError) },
       { label: "Save As…", shortcut: "⇧⌘S", action: () => void app.saveProject(true).catch(reportError) },
+      { label: "Save As Package Folder…", action: () => void app.saveProjectToFolder().catch(reportError) },
       { sep: true, label: "" },
       { label: "Export PNG", shortcut: "⇧⌘E", action: () => exportPng() },
       { label: "Export JPEG…", shortcut: "⌥⇧⌘S", action: () => showExportJpeg() },
@@ -1349,7 +1351,8 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     for (const d of app.docs) {
       const b = document.createElement("button");
       b.className = "doc-tab" + (d.id === app.activeDocId ? " active" : "");
-      b.textContent = `${d.dirty ? "● " : ""}${d.name}`;
+      b.textContent = `${d.dirty ? "● " : ""}${d.name}${d.source ? " ⟳" : ""}`;
+      if (d.source) b.title = `Watching ${d.source.label}: reloads when it changes on disk`;
       b.title = `${d.fileName ?? "Not saved yet"} · ${d.width}×${d.height}`;
       b.addEventListener("click", () => app.switchDocument(d.id));
       tabs.appendChild(b);
@@ -1830,6 +1833,26 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
     input.click();
   }
 
+  /** File › Open Package Folder…: a `.comp` folder (manifest.json + images/), watched for outside changes. */
+  function openFolderDialog(): void {
+    const picker = (window as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+    if (!picker) { reportError(new Error("This browser cannot open folders; open a .comp file instead.")); return; }
+    picker.call(window, { mode: "readwrite", id: "compositor-package" })
+      .then((dir) => app.openFolder(dir))
+      .catch((err) => { if ((err as DOMException).name !== "AbortError") reportError(err); });
+  }
+
+  // A watched package changed on disk while there are unsaved edits: revert or keep, never silently.
+  app.onExternalChange = (doc) => dialog<"revert" | "keep">(
+    "Project changed on disk",
+    `“${doc.name}” was changed by another program. Revert to the version on disk, or keep your unsaved edits?`,
+    [
+      { label: "Keep Mine", value: "keep" },
+      { label: "Revert", value: "revert", primary: true },
+    ],
+    "keep",
+  );
+
   /** Layer › Add Image…: pick image files and add each as a new layer fitted inside the canvas. */
   function addImageDialog(): void {
     const place = (f: File) => app.pasteImageFile(f, f.name.replace(/\.[^.]+$/, "") || "Image", "Add image");
@@ -1874,6 +1897,12 @@ export function mountUI(app: App, host: HTMLElement): UIRoot {
   canvasWrap.addEventListener("dragover", (e) => e.preventDefault());
   canvasWrap.addEventListener("drop", (e) => {
     e.preventDefault();
+    const item = e.dataTransfer?.items?.[0] as (DataTransferItem & { getAsFileSystemHandle?: () => Promise<FileSystemHandle | null> }) | undefined;
+    if (item?.getAsFileSystemHandle && e.dataTransfer?.files?.[0]?.type === "" && !e.dataTransfer.files[0].name.toLowerCase().endsWith(".comp")) {
+      // A dropped folder (a .comp package written by a script or agent).
+      void item.getAsFileSystemHandle().then((h) => { if (h?.kind === "directory") return app.openFolder(h as FileSystemDirectoryHandle); }).catch(reportError);
+      return;
+    }
     const f = e.dataTransfer?.files?.[0];
     if (!f) return;
     if (f.name.toLowerCase().endsWith(".comp")) { app.openFile(f).catch(reportError); return; }

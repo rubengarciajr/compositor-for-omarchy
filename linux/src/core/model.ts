@@ -1,4 +1,5 @@
 import type { GradientSettings } from "./gradient";
+import type { ProjectSource } from "../io/package";
 /** Core document model — mirrors Compositor's ImageLayer / CanvasDocument. */
 
 export type BlendMode =
@@ -181,6 +182,10 @@ export interface DocumentState {
   /** Where this document was opened from / last saved to (session only). */
   fileName?: string;
   fileHandle?: FileSystemFileHandle;
+  /** The package on disk this document is bound to; watched for outside changes and used by Save. */
+  source?: ProjectSource;
+  /** Fingerprint of the package when it was last read or written, to notice outside changes. */
+  diskState?: string | null;
 }
 
 export interface BrushSettings {

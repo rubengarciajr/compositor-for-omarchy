@@ -114,6 +114,11 @@ function transformFrom(m: ManifestTransform | undefined, w: number, h: number): 
 
 /** Serialize a document into a .comp ZIP (manifest.json + images/). */
 export async function serializeProject(doc: DocumentState, activeLayerId: string | null): Promise<Blob> {
+  return writeZip(await buildProject(doc, activeLayerId));
+}
+
+/** The files of a .comp package: `manifest.json` first, then `images/<ID>.png` and masks. */
+export async function buildProject(doc: DocumentState, activeLayerId: string | null): Promise<{ name: string; data: Uint8Array }[]> {
   const files: { name: string; data: Uint8Array }[] = [];
   const ids = new Map<string, string>();
   for (const l of doc.layers) ids.set(l.id, /^[0-9A-F-]{36}$/.test(l.id) ? l.id : l.id.toUpperCase());
@@ -176,7 +181,7 @@ export async function serializeProject(doc: DocumentState, activeLayerId: string
     linux: { name: doc.name, app: "compositor-linux/1.0.0", savedAt: new Date().toISOString() },
   };
   files.unshift({ name: "manifest.json", data: new TextEncoder().encode(JSON.stringify(manifest, null, 2)) });
-  return writeZip(files);
+  return files;
 }
 
 async function decodePng(bytes: Uint8Array): Promise<HTMLCanvasElement> {
@@ -197,7 +202,12 @@ export async function parseProject(buffer: ArrayBuffer, fallbackName: string): P
   const files = await readZip(buffer);
   // Accept a zipped package with a top-level folder too (e.g. "Name.comp/manifest.json").
   const prefix = [...files.keys()].find((k) => k.endsWith("manifest.json"))?.replace(/manifest\.json$/, "") ?? "";
-  const manifestBytes = files.get(`${prefix}manifest.json`);
+  return parseProjectFrom(async (path) => files.get(`${prefix}${path}`) ?? null, fallbackName);
+}
+
+/** Parse a package from any reader of `manifest.json` / `images/<file>` (ZIP, folder, URL). */
+export async function parseProjectFrom(read: (path: string) => Promise<Uint8Array | null>, fallbackName: string): Promise<{ doc: DocumentState; activeLayerId: string | null }> {
+  const manifestBytes = await read("manifest.json");
   if (!manifestBytes) throw new Error("Not a Compositor project (manifest.json missing)");
   const m = JSON.parse(new TextDecoder().decode(manifestBytes)) as Manifest;
   if (m.format !== PROJECT_FORMAT) throw new Error("Not a Compositor project");
@@ -213,7 +223,7 @@ export async function parseProject(buffer: ArrayBuffer, fallbackName: string): P
     const kind: Layer["kind"] = isGroup ? "group" : rec.adjustment ? "adjustment" : rec.text ? "text" : rec.shape ? "shape" : "raster";
     let canvas: HTMLCanvasElement | null = null;
     if (rec.imageFile) {
-      const bytes = files.get(`${prefix}images/${rec.imageFile}`);
+      const bytes = await read(`images/${rec.imageFile}`);
       if (!bytes) throw new Error(`Image missing inside project: ${rec.imageFile}`);
       canvas = await decodePng(bytes);
     }
@@ -228,7 +238,7 @@ export async function parseProject(buffer: ArrayBuffer, fallbackName: string): P
     layer.id = rec.id;
     idBySource.set(rec.id, layer.id);
     if (rec.maskFile) {
-      const bytes = files.get(`${prefix}images/${rec.maskFile}`);
+      const bytes = await read(`images/${rec.maskFile}`);
       if (bytes) layer.mask = { canvas: grayToMask(await decodePng(bytes)), enabled: rec.maskEnabled !== false, linked: rec.maskLinked !== false };
     }
     if (kind === "adjustment" && rec.adjustment) {

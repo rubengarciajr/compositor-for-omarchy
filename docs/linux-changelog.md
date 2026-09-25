@@ -4,6 +4,13 @@ What changed in the Linux port (`linux/`), newest first. Before shipping an upda
 `npm run check` in `linux/` (typecheck, build and the headless self-test) — it fails if any
 rendering, clipboard, history or theming check regresses.
 
+## 1.2.0 — 2026-09-25
+
+Brings the Linux port up to the features Compositor for macOS shipped between 1.2.5 and 1.3.1.
+
+### Added
+- **Watch AI design** (Compositor 1.3): any script or AI agent that can write files can build or change a project while it is open, and the canvas reloads as the package changes, usually within half a second. Open a `.comp` **package folder** (`manifest.json` + `images/`, the layout agents and the Mac app write) with File › Open Package Folder…, by dropping the folder on the canvas, or with `compositor ~/Desktop/demo.comp`; a `.comp` ZIP file opened through the file dialog is watched too. A reload keeps zoom, scroll, selection and the selected layer; with unsaved edits the app asks to Revert or Keep Mine. Save writes back into the folder (images first, manifest last); Save As Package Folder… turns any document into one. Watched documents show ⟳ in the status bar. How to write packages: [`docs/writing-comp-files.md`](writing-comp-files.md).
+
 ## 1.1.1 — 2026-09-23
 
 ### Changed

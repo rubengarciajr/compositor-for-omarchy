@@ -6,7 +6,7 @@
 # editor follows theme switches while it runs.
 #
 #   compositor                     # follow the active Omarchy theme
-#   compositor photo.png b.jpg     # open files
+#   compositor photo.png b.jpg     # open files (.comp files, or .comp package folders, reload live when edited)
 #   compositor --theme catppuccin  # force a palette (Omarchy theme name, or dark / light)
 #   compositor --browser           # show which browser engine would be used
 #   compositor --cache             # show what the private browser profile holds
@@ -109,8 +109,11 @@ for f in "${FILES[@]:-}"; do
   [[ -z "$f" ]] && continue
   if [[ -f "$f" ]]; then
     QUERY+=("open=$(urlencode "file://$(realpath -e "$f")")")
+  elif [[ -d "$f" && -f "$f/manifest.json" ]]; then
+    # A .comp package folder (manifest.json + images/), watched while open so scripts and AI agents can edit it live.
+    QUERY+=("open=$(urlencode "file://$(realpath -e "$f")")/")
   else
-    echo "Skipping '$f': not a file." >&2
+    echo "Skipping '$f': not a file or .comp package folder." >&2
   fi
 done
 

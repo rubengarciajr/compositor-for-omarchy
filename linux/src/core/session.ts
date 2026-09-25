@@ -36,7 +36,9 @@ function selectionMode(e: { shiftKey?: boolean; altKey?: boolean }): Selection["
   return "replace";
 }
 import { cursorFor, fromLocal, hitTest, rotateByPointer, scaleByHandle } from "./transform";
-import { PROJECT_EXTENSION, PROJECT_MIME, isProjectFile, parseProject, serializeProject } from "../io/project";
+import { PROJECT_EXTENSION, PROJECT_MIME, buildProject, isProjectFile, parseProject, parseProjectFrom, serializeProject } from "../io/project";
+import { folderSource, urlFolderSource, zipFileSource } from "../io/package";
+import type { ProjectSource } from "../io/package";
 import type { HandleSpec } from "./transform";
 import type { Transform } from "./model";
 import {
@@ -67,6 +69,11 @@ export class App {
   session: SessionState;
   history = new History();
   onChange: () => void = () => {};
+  /**
+   * A watched package changed on disk while the document has unsaved edits: ask whether to
+   * revert to the on-disk version or keep the edits (the shell shows a dialog).
+   */
+  onExternalChange: (doc: DocumentState) => Promise<"revert" | "keep"> = async () => "revert";
   /** Canvas-only refresh (no panel rebuild) — used while typing or dragging a live control. */
   onDraw: () => void = () => {};
   private strokePrev: { x: number; y: number } | null = null;
@@ -79,7 +86,12 @@ export class App {
   private transformHandle: HandleSpec | null = null;
   private pendingFit = true;
 
+  /** How often watched packages are checked for outside changes (ms). */
+  static WATCH_INTERVAL = 400;
+  private checking = false;
+
   constructor() {
+    setInterval(() => void this.checkExternalChanges(), App.WATCH_INTERVAL);
     this.session = {
       tool: "move",
       brush: { size: 24, hardness: 0.6, opacity: 1, flow: 1, spacing: 0.25, smoothing: 0.2, erase: false },
@@ -307,6 +319,7 @@ export class App {
     const { doc, activeLayerId } = await parseProject(buffer, base);
     doc.fileName = fileName;
     doc.fileHandle = handle;
+    if (handle) { doc.source = zipFileSource(handle); doc.diskState = await doc.source.fingerprint(); }
     this.docs.push(doc);
     this.activeDocId = doc.id;
     this.session.activeLayerId = activeLayerId;
@@ -314,6 +327,104 @@ export class App {
     this.history.reset(snapshot(doc, "Open project"));
     this.pendingFit = true;
     this.emit();
+  }
+
+  /**
+   * Open a project from a package source (a `.comp` folder handle, a folder URL, or a ZIP
+   * handle) and keep watching it: when a script or AI agent rewrites the package, the
+   * canvas reloads (Compositor 1.3 "Watch AI design").
+   */
+  async openProjectSource(source: ProjectSource): Promise<void> {
+    const base = source.label.replace(/\.[^.]+$/, "") || "Project";
+    const { doc, activeLayerId } = await parseProjectFrom((p) => source.read(p), base);
+    doc.fileName = source.label;
+    doc.source = source;
+    doc.diskState = await source.fingerprint();
+    this.docs.push(doc);
+    this.activeDocId = doc.id;
+    this.session.activeLayerId = activeLayerId;
+    this.session.selectedLayerIds = activeLayerId ? [activeLayerId] : [];
+    this.history.reset(snapshot(doc, "Open project"));
+    this.pendingFit = true;
+    this.emit();
+  }
+
+  /** Open a `.comp` package folder chosen with the directory picker (read and write). */
+  async openFolder(dir: FileSystemDirectoryHandle): Promise<void> {
+    return this.openProjectSource(folderSource(dir));
+  }
+
+  /** Poll every watched document's package; reload the ones that changed on disk. */
+  async checkExternalChanges(): Promise<void> {
+    if (this.checking) return;
+    this.checking = true;
+    try {
+      for (const doc of [...this.docs]) {
+        if (!doc.source || doc.diskState === undefined) continue;
+        const now = await doc.source.fingerprint();
+        if (now === null || now === doc.diskState) continue;
+        if (doc.dirty && (await this.onExternalChange(doc)) === "keep") { doc.diskState = now; continue; }
+        await this.reloadFromDisk(doc, now);
+      }
+    } finally {
+      this.checking = false;
+    }
+  }
+
+  /** Replace a document's contents with the package on disk, keeping zoom, scroll and selection. */
+  private async reloadFromDisk(doc: DocumentState, state: string): Promise<void> {
+    const source = doc.source!;
+    let parsed: { doc: DocumentState; activeLayerId: string | null };
+    try {
+      parsed = await parseProjectFrom((p) => source.read(p), doc.name);
+    } catch (err) {
+      // A half-written or invalid package: ignore it until the next change, like the Mac app.
+      console.warn("Package on disk could not be read:", err);
+      doc.diskState = state;
+      return;
+    }
+    if (this.session.textEdit?.layerId && doc === this.doc) this.endTextEdit(false);
+    const sameSize = parsed.doc.width === doc.width && parsed.doc.height === doc.height;
+    doc.layers = parsed.doc.layers;
+    doc.guides = parsed.doc.guides;
+    doc.width = parsed.doc.width;
+    doc.height = parsed.doc.height;
+    doc.resolution = parsed.doc.resolution;
+    if (!sameSize) doc.selection = null;
+    doc.dirty = false;
+    doc.diskState = state;
+    if (doc === this.doc) {
+      const keep = this.session.activeLayerId && doc.layers.some((l) => l.id === this.session.activeLayerId) ? this.session.activeLayerId : parsed.activeLayerId;
+      this.session.activeLayerId = keep;
+      this.session.selectedLayerIds = this.session.selectedLayerIds.filter((id) => doc.layers.some((l) => l.id === id));
+      if (!this.session.selectedLayerIds.length && keep) this.session.selectedLayerIds = [keep];
+    }
+    this.history.reset(snapshot(doc, "Reloaded from disk"));
+    this.emit();
+  }
+
+  /** Save the active document into a package folder chosen with the directory picker. */
+  async saveProjectToFolder(): Promise<boolean> {
+    const doc = this.doc;
+    const picker = (window as unknown as { showDirectoryPicker?: (o: unknown) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+    if (!doc || !picker) return false;
+    let dir: FileSystemDirectoryHandle;
+    try {
+      dir = await picker.call(window, { mode: "readwrite", id: "compositor-package" });
+    } catch (err) {
+      if ((err as DOMException).name === "AbortError") return false;
+      throw err;
+    }
+    const source = folderSource(dir);
+    await source.write!(await buildProject(doc, this.session.activeLayerId));
+    doc.source = source;
+    doc.fileHandle = undefined;
+    doc.fileName = dir.name;
+    if (!doc.name || doc.name === "Untitled") doc.name = dir.name.replace(/\.[^.]+$/, "");
+    doc.diskState = await source.fingerprint();
+    doc.dirty = false;
+    this.emitView();
+    return true;
   }
 
   /** Open any file the app understands: a .comp project or an image (as a new document). */
@@ -335,6 +446,14 @@ export class App {
   async saveProject(saveAs = false): Promise<boolean> {
     const doc = this.doc;
     if (!doc) return false;
+    if (!saveAs && doc.source?.write) {
+      // Bound to a package on disk (folder or file): write it in place and remember its new state.
+      await doc.source.write(await buildProject(doc, this.session.activeLayerId));
+      doc.diskState = await doc.source.fingerprint();
+      doc.dirty = false;
+      this.emitView();
+      return true;
+    }
     const blob = await this.projectBlob();
     if (!blob) return false;
     const suggested = (doc.fileName && isProjectFile(doc.fileName) ? doc.fileName : `${doc.name}${PROJECT_EXTENSION}`);
@@ -357,6 +476,8 @@ export class App {
       await w.close();
       doc.fileHandle = handle;
       doc.fileName = handle.name;
+      doc.source = zipFileSource(handle);
+      doc.diskState = await doc.source.fingerprint();
       if (!doc.name || doc.name === "Untitled") doc.name = handle.name.replace(/\.[^.]+$/, "");
     } else {
       const url = URL.createObjectURL(blob);
@@ -374,6 +495,7 @@ export class App {
 
   /** Open an image from any URL the page may read (blob:, file:// when the launcher allows it, http). */
   openImageUrl(url: string, fileName?: string): Promise<void> {
+    if (url.endsWith("/")) return this.openProjectSource(urlFolderSource(url)); // a .comp package folder
     if (isProjectFile(fileName ?? url)) {
       return fetch(url).then((r) => { if (!r.ok) throw new Error(`Could not read ${url}`); return r.arrayBuffer(); })
         .then((buf) => this.openProject(buf, fileName ?? decodeURIComponent(url.split("/").pop() ?? "Project.comp")));

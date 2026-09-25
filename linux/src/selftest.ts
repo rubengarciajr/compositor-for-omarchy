@@ -10,7 +10,8 @@ import { selectionOutline } from "./render/ants";
 import type { History } from "./core/history";
 import { applyThemeChoice, getThemePreference, parseColorsToml, themeChoice } from "./theme/omarchy";
 import { hitTest, rotateByPointer, scaleByHandle } from "./core/transform";
-import { parseProject, serializeProject } from "./io/project";
+import { buildProject, parseProject, serializeProject } from "./io/project";
+import { memorySource } from "./io/package";
 import { readZip } from "./io/zip";
 import { cursorForTool, WAND_ADD_CURSOR, WAND_CURSOR, WAND_SUBTRACT_CURSOR } from "./ui/cursors";
 import { writableLayer } from "./core/history";
@@ -383,6 +384,53 @@ export async function runSelfTest(app: App, onResult: (r: SelfTestResult) => voi
     const n = app.doc!.layers.length;
     app.pointerDown(view, ev(10, 20, { alt: true })); app.pointerMove(view, ev(30, 20, { alt: true })); app.pointerUp(view, ev(30, 20, { alt: true }));
     check("alt-drag with move duplicates the layer", app.doc!.layers.length === n + 1 && app.activeLayer!.id !== topId && Math.round(app.activeLayer!.transform.x) === 20, { n, now: app.doc!.layers.length, x: app.activeLayer!.transform.x });
+  }
+  // Live reload (Compositor 1.3 "Watch AI design"): a package edited on disk by a script or agent
+  // reloads the open document; unsaved edits are kept or reverted on request; Save writes in place.
+  {
+    const files = new Map<string, Uint8Array>();
+    const src = memorySource(files, "agent.comp");
+    app.newDocument(40, 30, "seed");
+    const bg = writableLayer(app.activeLayer!)!.getContext("2d")!;
+    bg.fillStyle = "#ff0000"; bg.fillRect(0, 0, 40, 30);
+    app.emit();
+    for (const e of await buildProject(app.doc!, app.session.activeLayerId)) files.set(e.name, e.data);
+    await app.openProjectSource(src);
+    const doc = app.doc!;
+    check("opens a package source", doc.source === src && doc.layers.length === 1 && px(flattenDocument(doc), 5, 5)[0] > 200 && !doc.dirty, { n: doc.layers.length });
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const manifest = () => JSON.parse(new TextDecoder().decode(files.get("manifest.json")!)) as { layers: Record<string, unknown>[] };
+    // The agent adds a blue layer: image first, then the manifest.
+    const blue = createCanvas(40, 30);
+    blue.getContext("2d")!.fillStyle = "#0000ff"; blue.getContext("2d")!.fillRect(0, 0, 40, 30);
+    const id = crypto.randomUUID().toUpperCase();
+    files.set(`images/${id}.png`, new Uint8Array(await (await new Promise<Blob | null>((r) => blue.toBlob(r, "image/png")))!.arrayBuffer()));
+    const m1 = manifest();
+    m1.layers.push({ id, name: "Agent layer", imageFile: `${id}.png`, isVisible: true, isGroup: false, opacity: 1, blendMode: "Normal", transform: { origin: [0, 0], size: [40, 30], rotation: 0, flipX: false, flipY: false, sampling: "High quality" } });
+    files.set("manifest.json", enc(JSON.stringify(m1)));
+    await app.checkExternalChanges();
+    check("reloads when the package changes on disk", doc.layers.length === 2 && doc.layers[1].name === "Agent layer" && px(flattenDocument(doc), 5, 5)[2] > 200 && !doc.dirty, { layers: doc.layers.map((l) => l.name) });
+    // Unsaved edits: "keep" leaves them, "revert" takes the disk version.
+    app.fillActive("#00ff00");
+    app.onExternalChange = async () => "keep";
+    const m2 = manifest(); m2.layers[1].name = "Renamed by agent"; files.set("manifest.json", enc(JSON.stringify(m2)));
+    await app.checkExternalChanges();
+    const kept = doc.layers[1].name === "Agent layer" && doc.dirty;
+    app.onExternalChange = async () => "revert";
+    const m3 = manifest(); m3.layers[1].name = "Renamed again"; files.set("manifest.json", enc(JSON.stringify(m3)));
+    await app.checkExternalChanges();
+    check("unsaved edits are kept or reverted on request", kept && doc.layers[1].name === "Renamed again" && !doc.dirty, { kept, name: doc.layers[1].name, dirty: doc.dirty });
+    // Save writes the package in place and the watcher accepts its own write.
+    app.fillActive("#0000ff");
+    await app.saveProject(false);
+    const saved = manifest();
+    const before = doc.layers.length;
+    await app.checkExternalChanges();
+    check("save writes the package in place", !doc.dirty && saved.layers.length === 2 && doc.diskState === await src.fingerprint() && doc.layers.length === before, { n: saved.layers.length });
+    // A half-written manifest is ignored until it is fixed.
+    files.set("manifest.json", enc("{ not json"));
+    await app.checkExternalChanges();
+    check("a half-written package is ignored", doc.layers.length === 2, { n: doc.layers.length });
   }
   // Trim transparent pixels: added images lose their empty padding but keep their place; the
   // command also works on a rotated, flipped layer.
